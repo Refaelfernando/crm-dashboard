@@ -1468,9 +1468,38 @@ function renderKPIFIR(f){
  const el = document.getElementById("kpiFIR");
  if (!el) return;
  const list = segs(f.seg);
+ const allChSelected = f.ch.length >= ALL_CHANNELS.length;
  const monthArr = (getterFn) => [0,1,2,3,4,5,6].map(getterFn);
- const createdAt = (mi) => { let t=0,any=false; list.forEach(seg=>{ const v=TREND[seg]&&TREND[seg].created[mi]; if(v!=null){t+=v;any=true;} }); return any?t:null; };
- const poAt = (mi) => { let t=0,any=false; list.forEach(seg=>{ const v=TREND[seg]&&TREND[seg].po[mi]; if(v!=null){t+=v;any=true;} }); return any?t:null; };
+ const createdAt = (mi) => {
+ let t=0, any=false;
+ list.forEach(seg => {
+ if (allChSelected) {
+ const v = TREND[seg] && TREND[seg].created[mi];
+ if (v!=null) { t+=v; any=true; }
+ } else {
+ f.ch.forEach(ch => {
+ const d = CHANNEL_DETAIL[seg] && CHANNEL_DETAIL[seg][ch];
+ if (d && d.created && d.created[mi]!=null) { t+=d.created[mi]; any=true; }
+ });
+ }
+ });
+ return any?t:null;
+ };
+ const poAt = (mi) => {
+ let t=0, any=false;
+ list.forEach(seg => {
+ if (allChSelected) {
+ const v = TREND[seg] && TREND[seg].po[mi];
+ if (v!=null) { t+=v; any=true; }
+ } else {
+ f.ch.forEach(ch => {
+ const d = CHANNEL_DETAIL[seg] && CHANNEL_DETAIL[seg][ch];
+ if (d && d.paidOut && d.paidOut[mi]!=null) { t+=d.paidOut[mi]; any=true; }
+ });
+ }
+ });
+ return any?t:null;
+ };
  const created = monthArr(createdAt), po = monthArr(poAt);
  const curM = (f.month === "all") ? 6 : f.month;
  if (curM === 0 || created[curM] == null) { el.innerHTML = firHtml("Belum ada data yang cukup dibandingkan (data awal periode atau kombinasi filter kosong).","-","-"); return; }
