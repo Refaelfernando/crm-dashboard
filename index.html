@@ -41,6 +41,13 @@
  .msdrop-panel label{display:flex;align-items:center;gap:6px;color:var(--text);font-size:12.5px;padding:4px 2px;margin-bottom:0;cursor:pointer;}
  .msdrop-panel input{cursor:pointer;}
 
+ .fir-block{margin-top:14px;border-top:1px solid var(--border);padding-top:12px;display:grid;gap:10px;}
+ .fir-item{display:grid;grid-template-columns:100px 1fr;gap:10px;align-items:start;font-size:12px;}
+ .fir-label{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;padding:3px 8px;border-radius:6px;text-align:center;height:fit-content;}
+ .fir-label.fir-f{background:#e6f2f6;color:var(--blue-dark);}
+ .fir-label.fir-i{background:#fdf1e6;color:var(--warn);}
+ .fir-label.fir-r{background:var(--good-bg);color:var(--good);}
+
  .kpi-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:var(--gap);margin-bottom:var(--gap);}
  .kpi{background:var(--card);border-radius:var(--radius);padding:14px 18px;box-shadow:0 1px 3px rgba(0,0,0,.06);border-left:3px solid var(--blue);}
  .kpi .l{font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;}
@@ -201,6 +208,7 @@
 
  <!-- KPI ROW -->
  <section class="kpi-row" id="kpiRow"></section>
+ <div id="kpiFIR" class="card" style="margin-bottom:var(--gap);"></div>
 
  <!-- FORECAST -->
  <section class="row" style="grid-template-columns:1fr;">
@@ -208,6 +216,7 @@
  <h3 id="forecastTitle"> Forecast Akhir Bulan</h3>
  <div class="cap" id="forecastCap">Regresi linear atas total harian s.d. tanggal terakhir yang ada datanya, diproyeksikan ke akhir bulan - mengikuti filter Segmen &amp; Channel (bukan filter Bulan)</div>
  <div id="forecastBox"></div>
+ <div id="forecastFIR"></div>
  </div>
  </section>
 
@@ -217,6 +226,7 @@
  <h3>Trend Created & Paid Out - Jan s.d. Jul</h3>
  <div class="cap">Semua bulan (termasuk Jul) adalah data aktual dari log transaksi.</div>
  <div class="chart-box tall"><canvas id="trendChart"></canvas></div>
+ <div id="trendFIR"></div>
  </div>
  <div class="card">
  <h3 id="junJulTitle">Created - Bulan Terpilih vs Bulan Sebelumnya</h3>
@@ -233,6 +243,7 @@
  <div style="overflow-x:auto;">
  <table class="dt" id="funnelRatioTable"></table>
  </div>
+ <div id="funnelRatioFIR"></div>
  </div>
  </section>
 
@@ -242,6 +253,7 @@
  <h3>Engagement per Channel - Jun vs Jul</h3>
  <div class="cap" id="channelEngageCap">Sent / Delivered / Click, mengikuti filter Segmen & Channel (data granular hanya tersedia Jun-Jul)</div>
  <div class="chart-box"><canvas id="channelEngageChart"></canvas></div>
+ <div id="channelEngageFIR"></div>
  </div>
  </section>
 
@@ -251,6 +263,7 @@
  <h3>Upper Funnel per Channel - Sent, Delivered, Click, Created</h3>
  <div class="cap" id="channelDetailCap">Mengikuti filter Bulan, Segmen & Channel</div>
  <div id="channelDetailTable"></div>
+ <div id="channelDetailFIR"></div>
  <div class="note">Created &amp; Paid Out per channel sekarang tersedia untuk semua channel (termasuk Sales AI) &amp; semua segmen, diambil dari log transaksi Lower Funnel. Sent/Delivered/Click masih dari Upper Funnel, yang cuma punya data untuk New/Repeat+TopUp(gabungan)/LMT - tidak ada untuk Sales AI atau segmen SL.</div>
  </div>
  </section>
@@ -261,12 +274,14 @@
  <h3>CPA (Cost per Paid Out) - Jun vs Jul</h3>
  <div class="cap">Rp per Paid Out, per segmen</div>
  <div class="chart-box"><canvas id="cpaChart"></canvas></div>
+ <div id="cpaFIR"></div>
  </div>
  <div class="card">
  <h3>Budget Agustus - Alokasi per Segmen</h3>
  <div class="cap">Total basis: Rp471,8jt (skenario CPA level Juni)</div>
  <div class="chart-box"><canvas id="budgetChart"></canvas></div>
  <div class="flag warn" id="budgetRisk"></div>
+ <div id="budgetFIR"></div>
  </div>
  </section>
 
@@ -288,6 +303,7 @@
  <h3>Cost per Channel &amp; Segmen</h3>
  <div class="cap" id="costByChannelCap">Mengikuti filter Bulan, Segmen &amp; Channel</div>
  <div id="costByChannelTable"></div>
+ <div id="costByChannelFIR"></div>
  <div class="note">Cost Email tercatat identik di ketiga segmen tiap bulan (kemungkinan alokasi gabungan, bukan cost per segmen murni). Cost Push = Rp0 (sudah termasuk biaya langganan MoEngage).</div>
  </div>
  </section>
@@ -300,6 +316,7 @@
  <div style="overflow-x:auto;">
  <table class="dt" id="costRatioTable"></table>
  </div>
+ <div id="costRatioFIR"></div>
  </div>
  </section>
 
@@ -1010,6 +1027,62 @@ async function loadLiveData(){
  }
 }
 
+// ===================== STATISTICAL ENGINE (Findings / Insight / Rekomendasi) =====================
+// z-score of a current value against the mean & spread of a set of historical values - answers
+// "is this change unusual relative to how much this metric normally swings, not just vs last month".
+function zScoreVsHistory(current, historyArr){
+ const valid = historyArr.filter(v => v != null);
+ if (valid.length < 2) return null;
+ const mean = valid.reduce((a,b)=>a+b,0) / valid.length;
+ const variance = valid.reduce((a,b)=>a+(b-mean)*(b-mean),0) / valid.length;
+ const sd = Math.sqrt(variance);
+ if (sd === 0) return { z: current===mean?0:(current>mean?4:-4), mean, sd };
+ return { z: (current-mean)/sd, mean, sd };
+}
+// Two-proportion z-test - the standard method for asking "is conversion rate A meaningfully
+// different from conversion rate B", accounting for sample size (not just comparing % points).
+function twoProportionZTest(x1, n1, x2, n2){
+ if (!n1 || !n2) return null;
+ const p1 = x1/n1, p2 = x2/n2;
+ const pPool = (x1+x2)/(n1+n2);
+ const se = Math.sqrt(pPool*(1-pPool)*(1/n1+1/n2));
+ if (se === 0) return { z:0, p1, p2 };
+ return { z: (p1-p2)/se, p1, p2 };
+}
+function zVerdict(z){
+ const az = Math.abs(z);
+ if (az >= 2.58) return { level:"bad", text:"sangat signifikan (setara >99% confidence)" };
+ if (az >= 1.96) return { level:"warn", text:"signifikan (setara >95% confidence)" };
+ if (az >= 1.0) return { level:"info", text:"agak menonjol, tapi belum cukup kuat disebut signifikan" };
+ return { level:"ok", text:"dalam rentang variasi normal, bukan sinyal kuat" };
+}
+// R-squared of the linear regression used for forecasting - tells us how well a straight line
+// actually fits the daily pace so far (low R-squared = forecast is shakier than it looks).
+function regressionRSquared(dailySeries){
+ const n = dailySeries.length;
+ if (n < 2) return null;
+ let cum = 0;
+ const points = dailySeries.map(d => { cum += d.value; return { x: d.day, y: cum }; });
+ const sumX = points.reduce((s,p)=>s+p.x,0), sumY = points.reduce((s,p)=>s+p.y,0);
+ const sumXY = points.reduce((s,p)=>s+p.x*p.y,0), sumX2 = points.reduce((s,p)=>s+p.x*p.x,0);
+ const denom = n*sumX2 - sumX*sumX;
+ if (denom === 0) return null;
+ const b = (n*sumXY - sumX*sumY) / denom;
+ const a = (sumY - b*sumX) / n;
+ const meanY = sumY / n;
+ const ssTot = points.reduce((s,p)=>s+(p.y-meanY)*(p.y-meanY), 0);
+ const ssRes = points.reduce((s,p)=>{ const pred = a+b*p.x; return s+(p.y-pred)*(p.y-pred); }, 0);
+ if (ssTot === 0) return 1;
+ return 1 - ssRes/ssTot;
+}
+function firHtml(findings, insight, recommendation){
+ return `<div class='fir-block'>
+ <div class='fir-item'><span class='fir-label fir-f'>Findings</span><div>${findings}</div></div>
+ <div class='fir-item'><span class='fir-label fir-i'>Insight</span><div>${insight}</div></div>
+ <div class='fir-item'><span class='fir-label fir-r'>Rekomendasi</span><div>${recommendation}</div></div>
+ </div>`;
+}
+
 // ===================== HELPERS =====================
 function rp(v){ return "Rp" + Math.round(v).toLocaleString("id-ID"); }
 function rpJt(v){ return "Rp" + (v/1e6).toFixed(1).replace(".",",") + "jt"; }
@@ -1099,10 +1172,11 @@ function renderForecast(f){
  if (!FORECAST_SOURCE || !FORECAST_SOURCE.maxDate) {
  titleEl.textContent = " Forecast Akhir Bulan";
  box.innerHTML = `<p class='note'>Forecast butuh data live dengan tanggal harian (kolom Created Date) - belum tersedia (masih pakai data cache/fallback, atau live-fetch belum berhasil).</p>`;
+ document.getElementById("forecastFIR").innerHTML = "";
  return;
  }
  const fc = computeForecast(FORECAST_SOURCE.bySegChDate, FORECAST_SOURCE.maxDate, f.seg, f.ch);
- if (!fc) { box.innerHTML = `<p class='note'>Tidak ada data untuk kombinasi filter ini.</p>`; return; }
+ if (!fc) { box.innerHTML = `<p class='note'>Tidak ada data untuk kombinasi filter ini.</p>`; document.getElementById("forecastFIR").innerHTML = ""; return; }
 
  titleEl.textContent = ` Forecast Akhir ${fc.monthLabel} (data s.d. tanggal ${fc.asOfDay})`;
  document.getElementById("forecastCap").textContent =
@@ -1120,6 +1194,22 @@ function renderForecast(f){
  <div class='s neu' style='margin-top:6px;'>${c.sub}</div>
  </div>`).join("")}</div>
  <p class='note' style='margin-top:10px;'>Metode: regresi linear least-squares atas kurva kumulatif harian bulan berjalan (bukan cuma rata-rata run-rate) - menangkap kalau pace-nya lagi naik/turun, bukan diasumsikan rata terus. Kalau data harian baru sedikit (awal bulan), forecast masih kasar dan akan makin stabil seiring lebih banyak hari terlewati.</p>`;
+
+ const createdSeries = buildDailySeries(FORECAST_SOURCE.bySegChDate, f.seg, f.ch, fc.year, fc.month, fc.asOfDay, "created");
+ const r2 = regressionRSquared(createdSeries);
+ const growthVsMtd = fc.created.mtdActual ? (fc.created.forecast - fc.created.mtdActual) / fc.created.mtdActual : null;
+ let confText, confLevel;
+ if (r2 == null || fc.asOfDay < 3) { confText = "data harian masih terlalu sedikit (< 3 hari) untuk dinilai keandalannya"; confLevel = "warn"; }
+ else if (r2 >= 0.85) { confText = `pola harian sangat konsisten (R² = ${r2.toFixed(2)}) - forecast cukup bisa diandalkan`; confLevel = "ok"; }
+ else if (r2 >= 0.5) { confText = `pola harian lumayan naik-turun (R² = ${r2.toFixed(2)}) - forecast indikatif, bukan angka pasti`; confLevel = "info"; }
+ else { confText = `pola harian sangat naik-turun/tidak stabil (R² = ${r2.toFixed(2)}) - forecast berisiko meleset jauh, jangan dijadikan patokan tunggal`; confLevel = "bad"; }
+ document.getElementById("forecastFIR").innerHTML = firHtml(
+ `Created MTD ${nf(fc.created.mtdActual)} (s.d. tgl ${fc.asOfDay}), diproyeksikan jadi ${nf(fc.created.forecast)} di akhir ${fc.monthLabel} (${growthVsMtd!=null?pct(growthVsMtd,1):'-'} dari MTD). Paid Out diproyeksikan ${nf(fc.paidOut.forecast)}, Paid Out Amount ${rp(fc.paidOutAmount.forecast)}.`,
+ `Keandalan forecast: ${confText}.`,
+ confLevel==="bad" || confLevel==="warn"
+ ? `Jangan langsung ambil keputusan besar (alokasi budget, target) dari angka forecast ini - tunggu beberapa hari lagi biar polanya lebih jelas, atau cross-check manual ke tim lapangan.`
+ : `Forecast ini cukup dipakai sebagai sinyal awal buat pacing bulan ini - tetap pantau lagi mendekati akhir bulan buat konfirmasi.`
+ );
 }
 
 function renderKPIs(f){
@@ -1233,6 +1323,55 @@ function renderKPIs(f){
  </div>`).join("");
 }
 
+function renderKPIFIR(f){
+ const el = document.getElementById("kpiFIR");
+ if (!el) return;
+ const list = segs(f.seg);
+ const monthArr = (getterFn) => [0,1,2,3,4,5,6].map(getterFn);
+ const createdAt = (mi) => { let t=0,any=false; list.forEach(seg=>{ const v=TREND[seg]&&TREND[seg].created[mi]; if(v!=null){t+=v;any=true;} }); return any?t:null; };
+ const poAt = (mi) => { let t=0,any=false; list.forEach(seg=>{ const v=TREND[seg]&&TREND[seg].po[mi]; if(v!=null){t+=v;any=true;} }); return any?t:null; };
+ const created = monthArr(createdAt), po = monthArr(poAt);
+ const curM = (f.month === "all") ? 6 : f.month;
+ if (curM === 0 || created[curM] == null) { el.innerHTML = firHtml("Belum ada data yang cukup dibandingkan (data awal periode atau kombinasi filter kosong).","-","-"); return; }
+
+ function momChanges(arr){ const c=[]; for(let i=1;i<=6;i++){ if(arr[i]!=null && arr[i-1]) c.push((arr[i]-arr[i-1])/arr[i-1]); } return c; }
+ function analyze(arr, label){
+ const cur = arr[curM], prev = arr[curM-1];
+ if (cur==null || !prev) return null;
+ const change = (cur-prev)/prev;
+ const allChanges = momChanges(arr);
+ const idx = allChanges.length - 1; // the most recent change corresponds to curM (if curM is the last month with data)
+ const history = allChanges.slice(0, idx); // changes before the current one
+ const zObj = zScoreVsHistory(change, history);
+ return { cur, prev, change, z: zObj ? zObj.z : null };
+}
+ const cA = analyze(created, "Created"), pA = analyze(po, "Paid Out");
+ if (!cA && !pA) { el.innerHTML = firHtml("Tidak ada bulan pembanding untuk dianalisis.","-","-"); return; }
+
+ const parts = [];
+ if (cA) parts.push(`Created ${MONTHS[curM]} = ${nf(cA.cur)} (${cA.change>=0?'+':''}${pct(cA.change,1)} vs ${MONTHS[curM-1]})`);
+ if (pA) parts.push(`Paid Out ${MONTHS[curM]} = ${nf(pA.cur)} (${pA.change>=0?'+':''}${pct(pA.change,1)} vs ${MONTHS[curM-1]})`);
+ const findings = parts.join('. ') + '.';
+
+ const insightParts = [];
+ [["Created", cA], ["Paid Out", pA]].forEach(([label, a]) => {
+ if (!a) return;
+ if (a.z == null) { insightParts.push(`${label}: belum cukup histori buat dinilai signifikansinya (butuh min. 3 bulan pembanding).`); return; }
+ const v = zVerdict(a.z);
+ insightParts.push(`${label}: perubahan ini ${v.text} dibanding pola fluktuasi bulan-bulan sebelumnya (z=${a.z.toFixed(2)}).`);
+ });
+ const insight = insightParts.join(' ');
+
+ const anySignificant = [cA, pA].some(a => a && a.z != null && Math.abs(a.z) >= 1.96);
+ const anyBadDrop = [cA, pA].some(a => a && a.z != null && a.z <= -1.96);
+ let recommendation;
+ if (anyBadDrop) recommendation = `Ada penurunan yang di luar kebiasaan - worth digali kenapa (channel tertentu drop? ada masalah teknis/kampanye berhenti?) sebelum diasumsikan cuma variasi biasa.`;
+ else if (anySignificant) recommendation = `Ada perubahan di luar kebiasaan (ke arah positif) - cek apa ada faktor yang bisa direplikasi/diperbesar bulan depan.`;
+ else recommendation = `Perubahan masih dalam rentang wajar - tidak perlu tindakan khusus, cukup pantau seperti biasa.`;
+
+ el.innerHTML = firHtml(findings, insight, recommendation);
+}
+
 // ===================== TREND CHART =====================
 function renderTrendChart(f){
  const ctx = document.getElementById("trendChart").getContext("2d");
@@ -1261,6 +1400,28 @@ function renderTrendChart(f){
  scales: { y: { beginAtZero: true, ticks: { callback: v => nf(v) } } }
  }
  });
+
+ const el = document.getElementById("trendFIR");
+ if (!el) return;
+ const rows = list.map(seg => {
+ const arr = TREND[seg].created;
+ const last = arr[6], prev = arr[5];
+ if (last==null || !prev) return null;
+ const change = (last-prev)/prev;
+ const changes = []; for (let i=1;i<=5;i++){ if(arr[i]!=null && arr[i-1]) changes.push((arr[i]-arr[i-1])/arr[i-1]); }
+ const zObj = zScoreVsHistory(change, changes);
+ return { seg, last, change, z: zObj ? zObj.z : null };
+ }).filter(Boolean);
+ if (!rows.length) { el.innerHTML = firHtml("Belum ada data cukup untuk analisis tren per segmen.","-","-"); return; }
+ const findings = rows.map(r => `${r.seg}: Created Jul ${nf(r.last)} (${r.change>=0?'+':''}${pct(r.change,1)} vs Jun)`).join('; ') + '.';
+ const flagged = rows.filter(r => r.z != null && Math.abs(r.z) >= 1.96);
+ const insight = flagged.length
+ ? flagged.map(r => `${r.seg} bergerak di luar kebiasaan (z=${r.z.toFixed(2)}, ${zVerdict(r.z).text})`).join('; ') + '.'
+ : `Semua segmen bergerak dalam rentang fluktuasi normalnya masing-masing (dibanding histori Jan-Jun).`;
+ const recommendation = flagged.length
+ ? `Fokus investigasi ke segmen yang di-flag di atas dulu - segmen lain nggak perlu tindakan khusus.`
+ : `Nggak ada segmen yang butuh perhatian khusus bulan ini - lanjutkan strategi yang sama.`;
+ el.innerHTML = firHtml(findings, insight, recommendation);
 }
 
 // ===================== BULAN COMPARISON BAR =====================
@@ -1343,6 +1504,27 @@ function renderChannelEngageChart(f){
  scales: { y: { beginAtZero: true, ticks: { callback: v => nf(v) } } }
  }
  });
+
+ const el = document.getElementById("channelEngageFIR");
+ if (el) {
+ const [sentJun, deliveredJun, clickJun] = jun;
+ const [sentJul, deliveredJul, clickJul] = jul;
+ if (!sentJun || !sentJul) {
+ el.innerHTML = firHtml("Tidak ada data Sent untuk kombinasi filter ini.","-","-");
+ } else {
+ const delivTest = twoProportionZTest(deliveredJul, sentJul, deliveredJun, sentJun);
+ const clickTest = twoProportionZTest(clickJul, sentJul, clickJun, sentJun);
+ const delivV = zVerdict(delivTest.z), clickV = zVerdict(clickTest.z);
+ const findings = `Delivery rate: ${pct(delivTest.p2,2)} (Jun) → ${pct(delivTest.p1,2)} (Jul). Click rate (dari Sent): ${pct(clickTest.p2,2)} (Jun) → ${pct(clickTest.p1,2)} (Jul).`;
+ const insight = `Perubahan delivery rate ${delivV.text} (z=${delivTest.z.toFixed(2)}). Perubahan click rate ${clickV.text} (z=${clickTest.z.toFixed(2)}).`;
+ let recommendation;
+ if (delivTest.z <= -1.96) recommendation = `Delivery rate turun signifikan - kemungkinan ada masalah kualitas nomor/kontak atau kebijakan provider (WhatsApp/Email) yang berubah, cek dulu sebelum nambah volume kirim.`;
+ else if (clickTest.z <= -1.96) recommendation = `Click rate turun signifikan walau delivery normal - kemungkinan soal konten/relevansi pesan, bukan soal teknis pengiriman.`;
+ else if (clickTest.z >= 1.96) recommendation = `Click rate naik signifikan - coba identifikasi apa yang beda (waktu kirim, konten, segmentasi) buat direplikasi.`;
+ else recommendation = `Engagement rate masih stabil - tidak ada tindakan mendesak.`;
+ el.innerHTML = firHtml(findings, insight, recommendation);
+ }
+ }
 }
 
 // ===================== CPA CHART =====================
@@ -1352,7 +1534,7 @@ function renderCpaChart(f){
  const jun = list.map(seg => CPA[seg] ? CPA[seg].jun : null);
  const jul = list.map(seg => CPA[seg] ? CPA[seg].jul : null);
  if (charts.cpa) charts.cpa.destroy();
- if (!list.length) { ctx.canvas.parentElement.innerHTML = `<div style='text-align:center;color:var(--muted);padding:16px;'>Tidak ada segmen dengan data Cost pada filter ini</div>`; return; }
+ if (!list.length) { ctx.canvas.parentElement.innerHTML = `<div style='text-align:center;color:var(--muted);padding:16px;'>Tidak ada segmen dengan data Cost pada filter ini</div>`; document.getElementById("cpaFIR").innerHTML = ""; return; }
  charts.cpa = new Chart(ctx, {
  type: "bar",
  data: {
@@ -1371,6 +1553,22 @@ function renderCpaChart(f){
  scales: { y: { beginAtZero: true, ticks: { callback: v => rp(v) } } }
  }
  });
+
+ const el = document.getElementById("cpaFIR");
+ if (el) {
+ const rows = list.map((seg,i) => (jun[i] && jul[i]!=null) ? { seg, jun: jun[i], jul: jul[i], change: (jul[i]-jun[i])/jun[i] } : null).filter(Boolean);
+ if (!rows.length) { el.innerHTML = firHtml("Data CPA belum lengkap untuk dibandingkan.","-","-"); }
+ else {
+ const findings = rows.map(r => `${r.seg}: CPA ${rp(r.jun)} (Jun) → ${rp(r.jul)} (Jul), ${r.change>=0?'+':''}${pct(r.change,1)}`).join('; ') + '.';
+ const flagged = rows.filter(r => Math.abs(r.change) > 0.3);
+ const insight = `Cuma ada 2 titik data (Jun, Jul), jadi belum bisa dijalanin uji signifikansi statistik beneran (butuh min. 3 titik buat estimasi variasi normal) - jadi di sini dipakai ambang batas materialitas 30% sebagai gantinya.` +
+ (flagged.length ? ` ${flagged.map(r=>r.seg).join(', ')} berubah lebih dari itu, patut diperhatikan.` : ` Tidak ada segmen yang berubah signifikan berdasar ambang itu.`);
+ const recommendation = flagged.some(r=>r.change>0.3)
+ ? `CPA naik tajam di ${flagged.filter(r=>r.change>0.3).map(r=>r.seg).join(', ')} - audit channel/campaign di segmen itu sebelum nambah budget lebih jauh.`
+ : (flagged.some(r=>r.change<-0.3) ? `CPA turun tajam di ${flagged.filter(r=>r.change<-0.3).map(r=>r.seg).join(', ')} - kesempatan bagus buat nambah budget di situ selama volume/kualitas Paid Out tetap terjaga.` : `CPA relatif stabil - alokasi budget saat ini masih wajar dipertahankan.`);
+ el.innerHTML = firHtml(findings, insight, recommendation);
+ }
+ }
 }
 
 // ===================== BUDGET CHART =====================
@@ -1408,6 +1606,19 @@ function renderBudgetChart(f){
  } else {
  riskEl.innerHTML = `<b>Aman:</b> skenario downside (${rpJt(totalDownside)}) masih di bawah cap Rp500jt.`;
  }
+
+ const firEl = document.getElementById("budgetFIR");
+ if (firEl) {
+ const variancePct = totalBase ? (totalDownside-totalBase)/totalBase : 0;
+ const findings = `Basis budget (pakai CPA Jun) = ${rpJt(totalBase)}. Skenario downside (pakai CPA Jul) = ${rpJt(totalDownside)} (${variancePct>=0?'+':''}${pct(variancePct,1)}).`;
+ const insight = Math.abs(variancePct) > 0.3
+ ? `Selisih antar-skenario cukup besar (>30%) - berarti angka budget ini sensitif banget terhadap asumsi CPA yang dipakai, bukan angka yang solid.`
+ : `Selisih antar-skenario relatif kecil (<30%) - basis budget ini cukup stabil terhadap perubahan CPA bulan ke bulan.`;
+ const recommendation = Math.abs(variancePct) > 0.3
+ ? `Jangan komit ke satu angka budget doang - siapkan buffer atau approval bertahap, dan pantau CPA aktual minggu-minggu awal Agustus buat re-kalibrasi cepat kalau ternyata lebih dekat ke skenario downside.`
+ : `Budget basis ini cukup aman dipakai sebagai acuan pengajuan, risiko meleset jauh relatif kecil.`;
+ firEl.innerHTML = firHtml(findings, insight, recommendation);
+ }
 }
 
 // ===================== FUNNEL CONVERSION RATIO TABLE =====================
@@ -1438,6 +1649,32 @@ function poolRatioCell(numArr, denArr){
  return `<td class='num'>${pct(num/den,2)}<div class='note' style='margin:2px 0 0;'>Pooled Jan-Jul</div></td>`;
 }
 
+function funnelRatioFIR(list, uptoMonth){
+ // Pool Created & Paid Out across the selected segments, for the latest month vs all months before it,
+ // then run a two-proportion z-test: is this month's Paid Out/Created rate really different, or just noise?
+ const el = document.getElementById("funnelRatioFIR");
+ if (!el) return;
+ const lastM = uptoMonth === "all" ? 6 : uptoMonth;
+ if (lastM === 0) { el.innerHTML = firHtml("Bulan awal periode - belum ada pembanding.","-","-"); return; }
+ let curCreated=0, curPO=0, priorCreated=0, priorPO=0;
+ list.forEach(seg => {
+ const t = TREND[seg];
+ for (let i=0;i<=lastM;i++){
+ const c = t.created[i]||0, p = t.po[i]||0;
+ if (i===lastM) { curCreated+=c; curPO+=p; } else { priorCreated+=c; priorPO+=p; }
+ }
+ });
+ if (!curCreated || !priorCreated) { el.innerHTML = firHtml("Data belum cukup untuk uji statistik.","-","-"); return; }
+ const test = twoProportionZTest(curPO, curCreated, priorPO, priorCreated);
+ const v = zVerdict(test.z);
+ const findings = `Rasio Paid Out/Created bulan ${MONTHS[lastM]} = ${pct(test.p1,2)} (${nf(curPO)}/${nf(curCreated)}), dibanding rata-rata bulan-bulan sebelumnya ${pct(test.p2,2)} (${nf(priorPO)}/${nf(priorCreated)}).`;
+ const insight = `Selisih ini ${v.text} secara statistik (two-proportion z-test, z=${test.z.toFixed(2)}) - artinya ${Math.abs(test.z)>=1.96 ? 'kemungkinan besar ada penyebab nyata (bukan kebetulan sample), ' : 'kemungkinan besar cuma variasi wajar dari bulan ke bulan, '}mengingat ukuran sample datanya.`;
+ const recommendation = test.z <= -1.96
+ ? `Conversion rate turun signifikan - cek tahapan mana di funnel yang macet (After FF, Eligible, atau Accepted) sebelum nyalahin channel/campaign.`
+ : (test.z >= 1.96 ? `Conversion rate naik signifikan - identifikasi apa yang beda bulan ini (channel, campaign, targeting) biar bisa direplikasi.` : `Nggak perlu investigasi khusus - rasio konversi masih stabil secara statistik.`);
+ el.innerHTML = firHtml(findings, insight, recommendation);
+}
+
 function renderFunnelRatioTable(f){
  const list = segs(f.seg);
  const m = f.month;
@@ -1460,6 +1697,7 @@ function renderFunnelRatioTable(f){
  });
  html += "</tbody>";
  document.getElementById("funnelRatioTable").innerHTML = html;
+ funnelRatioFIR(list, "all");
  return;
  }
 
@@ -1483,6 +1721,7 @@ function renderFunnelRatioTable(f){
  });
  html += "</tbody>";
  document.getElementById("funnelRatioTable").innerHTML = html;
+ funnelRatioFIR(list, m);
 }
 
 // ===================== CHANNEL DETAIL TABLE (Sent/Delivered/Click/Created) =====================
@@ -1538,6 +1777,29 @@ function renderChannelDetailTable(f){
 
  if (!anyRow) html = `<div style='text-align:center;color:var(--muted);padding:16px;'>Tidak ada data untuk kombinasi filter ini</div>`;
  document.getElementById("channelDetailTable").innerHTML = html;
+
+ const el = document.getElementById("channelDetailFIR");
+ if (el) {
+ const chStats = chList.map(ch => {
+ let sent=0, click=0;
+ list.forEach(seg => { const d = CHANNEL_DETAIL[seg][ch]; if (d && d.sent) { sent += val(d.sent)||0; click += val(d.click)||0; } });
+ return { ch, sent, click, rate: sent ? click/sent : null };
+ }).filter(x => x.sent > 0);
+ if (chStats.length < 2) {
+ el.innerHTML = firHtml("Kurang dari 2 channel dengan data Sent - tidak ada perbandingan yang bisa dibuat.","-","-");
+ } else {
+ chStats.sort((a,b)=>b.rate-a.rate);
+ const best = chStats[0], worst = chStats[chStats.length-1];
+ const test = twoProportionZTest(best.click, best.sent, worst.click, worst.sent);
+ const v = zVerdict(test.z);
+ const findings = `Click rate tertinggi: ${best.ch} (${pct(best.rate,2)}). Click rate terendah: ${worst.ch} (${pct(worst.rate,2)}).`;
+ const insight = `Selisih antara ${best.ch} dan ${worst.ch} ${v.text} (two-proportion z-test, z=${test.z.toFixed(2)}).`;
+ const recommendation = Math.abs(test.z) >= 1.96
+ ? `Perbedaan performa antar-channel ini nyata secara statistik - worth geser sebagian budget/effort dari ${worst.ch} ke ${best.ch}, atau audit konten/targeting ${worst.ch}.`
+ : `Perbedaan antar-channel belum cukup besar buat dibilang satu channel "lebih baik" secara statistik - jangan buru-buru realokasi budget cuma dari angka ini.`;
+ el.innerHTML = firHtml(findings, insight, recommendation);
+ }
+ }
 }
 
 // ===================== COST BY CHANNEL TABLE =====================
@@ -1591,6 +1853,31 @@ function renderCostByChannelTable(f){
 
  if (!anyRow) html = `<div style='text-align:center;color:var(--muted);padding:16px;'>Tidak ada data untuk kombinasi filter ini</div>`;
  document.getElementById("costByChannelTable").innerHTML = html;
+
+ const firEl = document.getElementById("costByChannelFIR");
+ if (firEl) {
+ if (!anyRow) { firEl.innerHTML = ""; }
+ else {
+ const totals = {};
+ chList.forEach(ch => { totals[ch] = 0; });
+ list.forEach(seg => chList.forEach(ch => { const v = getCur(COST_BY_CHANNEL[seg][ch]); if (v) totals[ch] += v; }));
+ const grand = Object.values(totals).reduce((a,b)=>a+b,0);
+ const sorted = Object.entries(totals).filter(([,v])=>v>0).sort((a,b)=>b[1]-a[1]);
+ if (!sorted.length || !grand) { firEl.innerHTML = firHtml("Tidak ada cost tercatat untuk kombinasi ini.","-","-"); }
+ else {
+ const [topCh, topVal] = sorted[0];
+ const share = topVal/grand;
+ const findings = `${topCh} menyerap ${pct(share,1)} dari total cost (${rp(topVal)} dari ${rp(grand)})${sorted.length>1?`; channel lain: ${sorted.slice(1).map(([c,v])=>`${c} ${pct(v/grand,1)}`).join(', ')}`:''}.`;
+ const insight = share > 0.7
+ ? `Konsentrasi spend sangat tinggi di satu channel (>70%) - portofolio channel ini nggak terdiversifikasi, risikonya numpuk di satu titik.`
+ : (share > 0.5 ? `Lebih dari separuh spend ada di satu channel - masih relatif terkonsentrasi.` : `Spend tersebar cukup merata antar-channel.`);
+ const recommendation = share > 0.7
+ ? `Pertimbangkan uji coba alokasi ke channel lain dalam skala kecil, biar nggak terlalu bergantung ke ${topCh} kalau ada gangguan (rate card berubah, delivery drop, dll).`
+ : `Distribusi spend saat ini masih sehat - nggak ada urgensi diversifikasi lebih jauh.`;
+ firEl.innerHTML = firHtml(findings, insight, recommendation);
+ }
+ }
+ }
 }
 
 // ===================== CHANNEL TABLE =====================
@@ -1713,6 +2000,29 @@ function renderCostRatioTable(f){
  });
  html += "</tbody>";
  document.getElementById("costRatioTable").innerHTML = html;
+
+ const firEl = document.getElementById("costRatioFIR");
+ if (firEl) {
+ let junAmt=0, junCost=0, julAmt=0, julCost=0, anyJul=true;
+ list.forEach(seg => {
+ const d = PO_AMOUNT_COST[seg];
+ if (!d) return;
+ junAmt += d.junAmt||0; junCost += d.junCost||0;
+ if (d.julCost==null || d.julAmt==null) anyJul=false; else { julAmt += d.julAmt; julCost += d.julCost; }
+ });
+ if (!junAmt || !anyJul || !julAmt) { firEl.innerHTML = firHtml("Data belum lengkap untuk dianalisis (pooled across segmen terpilih).","-","-"); }
+ else {
+ const rJun = junCost/junAmt, rJul = julCost/julAmt;
+ const change = (rJul-rJun)/rJun;
+ const findings = `Cost Ratio (pooled, segmen terpilih): ${pct(rJun,2)} (Jun) → ${pct(rJul,2)} (Jul), ${change>=0?'+':''}${pct(change,1)}. Return (Paid Out Amount / Cost): ${(1/rJun).toFixed(1)}x → ${(1/rJul).toFixed(1)}x.`;
+ const insight = `Cuma 2 titik data (Jun, Jul) - belum bisa diuji signifikansi statistiknya secara formal, jadi dipakai ambang materialitas 20% buat nilai "berubah cukup besar atau nggak".` +
+ (Math.abs(change) > 0.2 ? ` Perubahan ${pct(Math.abs(change),1)} ini di atas ambang itu.` : ` Perubahan masih di bawah ambang itu, relatif stabil.`);
+ const recommendation = change > 0.2
+ ? `Efisiensi spend memburuk (cost per rupiah payout naik) - cek apa ini karena CPA naik atau memang volume payout turun, sebelum nambah budget lebih jauh.`
+ : (change < -0.2 ? `Efisiensi spend membaik - kondisi bagus buat pertimbangkan nambah budget selama tren ini konsisten.` : `Efisiensi spend relatif stabil - nggak ada tindakan mendesak dari sisi ini.`);
+ firEl.innerHTML = firHtml(findings, insight, recommendation);
+ }
+ }
 }
 
 // ===================== BUDGET USAGE ALERT =====================
@@ -1956,6 +2266,7 @@ function recomputePacing(){
 function onFilterChange(){
  const f = getFilters();
  renderKPIs(f);
+ renderKPIFIR(f);
  renderForecast(f);
  renderTrendChart(f);
  renderJunJulChart(f);
