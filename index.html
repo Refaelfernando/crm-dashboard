@@ -386,6 +386,18 @@ const CH_DISPLAY = { "WhatsApp":"WhatsApp", "Email":"Email", "Push":"Push Notifi
 // belum dipecah per segmen granular - "Repeat" & "TopUp" masih berbagi satu blok gabungan
 // "Repeat + Top Up", dan "SL" sama sekali tidak ada di kedua sheet ini.
 const COST_SOURCE_SEG = { "New":"New", "Repeat":"Repeat+TopUp", "TopUp":"Repeat+TopUp", "LMT":"LMT", "SL": null };
+// Per-segment analysis focus, as specified by the user: New cares about Created/Eligible/Paid Out
+// Amount; Repeat, TopUp and LMT care about Created/Paid Out/Paid Out Amount. SL has no stated rule -
+// defaulted to the same set as Repeat/TopUp/LMT (the majority pattern) until told otherwise.
+const SEGMENT_FOCUS_METRICS = {
+ "New": ["created","eligible","paidOutAmount"],
+ "Repeat": ["created","paidOut","paidOutAmount"],
+ "TopUp": ["created","paidOut","paidOutAmount"],
+ "LMT": ["created","paidOut","paidOutAmount"],
+ "SL": ["created","paidOut","paidOutAmount"],
+};
+const METRIC_LABEL = { created:"Created", afterFF:"After FF", eligible:"Eligible", accepted:"Accepted", paidOut:"Paid Out", paidOutAmount:"Paid Out Amount" };
+const METRIC_IS_CURRENCY = { paidOutAmount: true };
 
 // ===================== EMBEDDED DATA =====================
 const MONTHS = ["Jan","Feb","Mar","Apr","Mei","Jun","Jul"];
@@ -533,6 +545,7 @@ let TREND = TREND_FALLBACK, COST = COST_FALLBACK, CPA = CPA_FALLBACK,
  CHANNEL_DETAIL = CHANNEL_DETAIL_FALLBACK, COST_BY_CHANNEL = COST_BY_CHANNEL_FALLBACK,
  AUG_COST = AUG_COST_FALLBACK, WA_STATS = WA_STATS_FALLBACK;
 let FORECAST_SOURCE = null; // only populated after a successful live fetch - needs real daily dates, which the offline fallback snapshot doesn't have
+let TARGET_AGG = null; // Target sheet, aggregated per segment/month/metric - only populated after a successful live fetch
 
 // ===================== LIVE DATA LOADER (Google Sheet) =====================
 const SHEET_ID = "1gdUPT9xcT0xXKBBlFHUXhTIqDBAd1tdbk10VohmIo6c";
@@ -817,6 +830,17 @@ function targetVal(agg, seg, metric, month){
  const s = agg[seg]; if (!s || !s[month]) return null;
  const v = s[month][metric]; return v == null ? null : v;
 }
+// Convenience reader against the global TARGET_AGG (populated after a live fetch), for render-time use.
+function getTarget(seg, metric, month){
+ if (!TARGET_AGG) return null;
+ return targetVal(TARGET_AGG, seg, metric, month);
+}
+function achievementVerdict(pctOfTarget){
+ if (pctOfTarget >= 1.0) return { level:"ok", text:"sudah mencapai atau melewati target" };
+ if (pctOfTarget >= 0.9) return { level:"info", text:"mendekati target (90%+)" };
+ if (pctOfTarget >= 0.7) return { level:"warn", text:"di bawah target, perlu dikejar" };
+ return { level:"bad", text:"jauh di bawah target" };
+}
 
 function fetchViaAppsScript(sheetName){
  return new Promise((resolve, reject) => {
@@ -867,16 +891,17 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  const srcSeg = COST_SOURCE_SEG[seg]; // "New" / "Repeat+TopUp" / "LMT" / null (SL - no Cost/Upper Funnel source)
 
  // ---- TREND: Created/Paid Out/funnel stages, Jan..Jul, aggregated straight from the raw log ----
- const created=[], po=[], afterFF=[], eligible=[], accepted=[];
+ const created=[], po=[], poAmount=[], afterFF=[], eligible=[], accepted=[];
  for (let m = 1; m <= 7; m++) {
  created.push(lowerLogVal(lowerAgg, seg, "created", m));
  po.push(lowerLogVal(lowerAgg, seg, "paidOut", m));
+ poAmount.push(lowerLogVal(lowerAgg, seg, "paidOutAmount", m));
  afterFF.push(lowerLogVal(lowerAgg, seg, "afterFF", m));
  eligible.push(lowerLogVal(lowerAgg, seg, "eligible", m));
  accepted.push(lowerLogVal(lowerAgg, seg, "accepted", m));
  }
  const hasEligible = eligible.some(v => v != null && v > 0);
- trend[seg] = { created, po, afterFF, eligible: hasEligible ? eligible : null, accepted, julLabel: "aktual" };
+ trend[seg] = { created, po, paidOutAmount: poAmount, afterFF, eligible: hasEligible ? eligible : null, accepted, julLabel: "aktual" };
 
  // ---- COST: only where a Cost Detail source exists ----
  cost[seg] = srcSeg ? [1,2,3,4,5,6,7].map(m => costVal(costRows, costIdx, srcSeg, "Total", m)) : [null,null,null,null,null,null,null];
@@ -988,6 +1013,7 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
 
  return { trend, cost, cpa, poAmountCost, channel, channelEngage, budgetAug, channelDetail, costByChannel, augCost, waStats,
  forecastSource: { bySegChDate, maxDate },
+ targetAgg,
  debug: { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, upperIdx, costIdx } };
 }
 
@@ -1062,6 +1088,7 @@ async function loadLiveData(){
  CHANNEL_DETAIL = computed.channelDetail; COST_BY_CHANNEL = computed.costByChannel;
  AUG_COST = computed.augCost; WA_STATS = computed.waStats;
  FORECAST_SOURCE = computed.forecastSource;
+ TARGET_AGG = computed.targetAgg;
  LAST_DEBUG = computed.debug;
  renderDebugPanel();
  if (!calcInitializedWithLiveData) { renderPacingCalculator(getFilters()); calcInitializedWithLiveData = true; }
@@ -1077,6 +1104,7 @@ async function loadLiveData(){
  CHANNEL_DETAIL = CHANNEL_DETAIL_FALLBACK; COST_BY_CHANNEL = COST_BY_CHANNEL_FALLBACK;
  AUG_COST = AUG_COST_FALLBACK; WA_STATS = WA_STATS_FALLBACK;
  FORECAST_SOURCE = null;
+ TARGET_AGG = null;
  statusEl.innerHTML = `[CACHE] <b>Data cache</b> (snapshot 23 Jul 2026) - live fetch gagal. Pastikan Google Sheet sudah di-share 'Anyone with link can view'. <span style='color:var(--bad);'>(${err.message})</span>`;
  onFilterChange();
  } finally {
@@ -1112,6 +1140,18 @@ function zVerdict(z){
  if (az >= 1.96) return { level:"warn", text:"signifikan (setara >95% confidence)" };
  if (az >= 1.0) return { level:"info", text:"agak menonjol, tapi belum cukup kuat disebut signifikan" };
  return { level:"ok", text:"dalam rentang variasi normal, bukan sinyal kuat" };
+}
+// SPC (Statistical Process Control)-style action tier - deliberately more responsive than waiting
+// for textbook p<0.05 significance. With only 5-6 historical points, requiring |z|>=1.96 before
+// recommending ANY action means real, business-relevant moves get called "normal, do nothing" far
+// too often. SPC control-chart practice treats the 1-2 sigma band as an actionable early-warning
+// zone (investigate/test), and only escalates to "stop and fix" language at >=2 / >=2.58 sigma.
+function zTier(z){
+ const az = Math.abs(z);
+ if (az >= 2.58) return "strong";
+ if (az >= 1.96) return "significant";
+ if (az >= 1.0) return "watch";
+ return "stable";
 }
 // R-squared of the linear regression used for forecasting - tells us how well a straight line
 // actually fits the daily pace so far (low R-squared = forecast is shakier than it looks).
@@ -1347,11 +1387,18 @@ function renderCustomRange(f){
  } else {
  const v = zVerdict(zObj.z);
  insight = `Rata-rata harian di rentang ini ${v.text} dibanding rata-rata hari-hari lain (z=${zObj.z.toFixed(2)}; rata-rata hari lain=${zObj.mean.toFixed(1)}/hari).`;
- recommendation = Math.abs(zObj.z) >= 1.96
- ? (zObj.z > 0
- ? `Periode ini jauh di atas rata-rata - identifikasi apa penyebabnya (campaign, momentum, dll) buat direplikasi di periode lain.`
- : `Periode ini jauh di bawah rata-rata - cek apa ada gangguan (hari libur, sistem down, campaign berhenti) di rentang tanggal ini.`)
- : `Performa periode ini masih dalam rentang wajar dibanding hari-hari lain - tidak ada anomali yang perlu digali.`;
+ const tier = zTier(zObj.z);
+ if (tier === "strong" || tier === "significant") {
+ recommendation = zObj.z > 0
+ ? `Periode ini jauh di atas rata-rata - Action: identifikasi penyebabnya (campaign, momentum, hari kerja/weekend) dan replikasi di periode berikutnya.`
+ : `Periode ini jauh di bawah rata-rata - Action: cek dulu apa ada gangguan (hari libur, sistem down, campaign berhenti) di rentang ini sebelum menyimpulkan performa turun.`;
+ } else if (tier === "watch") {
+ recommendation = zObj.z > 0
+ ? `Ada indikasi periode ini di atas rata-rata (belum signifikan penuh) - Action: perpanjang pengamatan sebelum menyimpulkan ini tren beneran.`
+ : `Ada indikasi periode ini di bawah rata-rata (belum signifikan penuh) - Action: waspada, pantau apa berlanjut di periode berikutnya.`;
+ } else {
+ recommendation = `Performa periode ini masih dalam rentang wajar - Action: tidak ada tindakan khusus yang diperlukan.`;
+ }
  }
  firEl.innerHTML = firHtml(findings, insight, recommendation);
 }
@@ -1520,85 +1567,112 @@ function renderKPIFIR(f){
  if (!zObj) { el.innerHTML = firHtml(findings, "Belum cukup variasi data pembanding.", "Gunakan angka ini sebagai referensi mentah dulu."); return; }
  const v = zVerdict(zObj.z);
  const insight = `Rata-rata harian Created di rentang ini ${v.text} dibanding rata-rata hari-hari lain (z=${zObj.z.toFixed(2)}; rata-rata hari lain=${zObj.mean.toFixed(1)}/hari).`;
- const recommendation = Math.abs(zObj.z) >= 1.96
- ? (zObj.z > 0 ? `Periode ini jauh di atas rata-rata - identifikasi penyebabnya buat direplikasi.` : `Periode ini jauh di bawah rata-rata - cek apa ada gangguan di rentang tanggal ini.`)
- : `Performa periode ini masih dalam rentang wajar dibanding hari-hari lain.`;
+ const tier = zTier(zObj.z);
+ let recommendation;
+ if (tier === "strong" || tier === "significant") {
+ recommendation = zObj.z > 0
+ ? `Periode ini jauh di atas rata-rata - Action: identifikasi penyebabnya (campaign/momentum apa yang jalan di tanggal ini) dan replikasi di periode berikutnya.`
+ : `Periode ini jauh di bawah rata-rata - Action: cek dulu apa ada gangguan (hari libur, sistem down, campaign berhenti) di rentang ini sebelum ambil kesimpulan performa turun.`;
+ } else if (tier === "watch") {
+ recommendation = zObj.z > 0
+ ? `Ada indikasi periode ini di atas rata-rata (belum signifikan penuh) - Action: perpanjang pengamatan beberapa hari lagi sebelum menyimpulkan ini tren beneran.`
+ : `Ada indikasi periode ini di bawah rata-rata (belum signifikan penuh) - Action: waspada, tapi belum perlu tindakan besar - pantau apa berlanjut di hari-hari berikutnya.`;
+ } else {
+ recommendation = `Performa periode ini masih dalam rentang wajar dibanding hari-hari lain - Action: tidak perlu tindakan khusus.`;
+ }
  el.innerHTML = firHtml(findings, insight, recommendation);
  return;
  }
 
  const allChSelected = f.ch.length >= ALL_CHANNELS.length;
- const monthArr = (getterFn) => [0,1,2,3,4,5,6].map(getterFn);
- const createdAt = (mi) => {
- let t=0, any=false;
- list.forEach(seg => {
- if (allChSelected) {
- const v = TREND[seg] && TREND[seg].created[mi];
- if (v!=null) { t+=v; any=true; }
- } else {
- f.ch.forEach(ch => {
- const d = CHANNEL_DETAIL[seg] && CHANNEL_DETAIL[seg][ch];
- if (d && d.created && d.created[mi]!=null) { t+=d.created[mi]; any=true; }
- });
- }
- });
- return any?t:null;
- };
- const poAt = (mi) => {
- let t=0, any=false;
- list.forEach(seg => {
- if (allChSelected) {
- const v = TREND[seg] && TREND[seg].po[mi];
- if (v!=null) { t+=v; any=true; }
- } else {
- f.ch.forEach(ch => {
- const d = CHANNEL_DETAIL[seg] && CHANNEL_DETAIL[seg][ch];
- if (d && d.paidOut && d.paidOut[mi]!=null) { t+=d.paidOut[mi]; any=true; }
- });
- }
- });
- return any?t:null;
- };
- const created = monthArr(createdAt), po = monthArr(poAt);
  const curM = (f.month === "all") ? 6 : f.month;
- if (curM === 0 || created[curM] == null) { el.innerHTML = firHtml("Belum ada data yang cukup dibandingkan (data awal periode atau kombinasi filter kosong).","-","-"); return; }
 
- function momChanges(arr){ const c=[]; for(let i=1;i<=6;i++){ if(arr[i]!=null && arr[i-1]) c.push((arr[i]-arr[i-1])/arr[i-1]); } return c; }
- function analyze(arr, label){
- const cur = arr[curM], prev = arr[curM-1];
- if (cur==null || !prev) return null;
- const change = (cur-prev)/prev;
- const allChanges = momChanges(arr);
- const idx = allChanges.length - 1; // the most recent change corresponds to curM (if curM is the last month with data)
- const history = allChanges.slice(0, idx); // changes before the current one
- const zObj = zScoreVsHistory(change, history);
- return { cur, prev, change, z: zObj ? zObj.z : null };
-}
- const cA = analyze(created, "Created"), pA = analyze(po, "Paid Out");
- if (!cA && !pA) { el.innerHTML = firHtml("Tidak ada bulan pembanding untuk dianalisis.","-","-"); return; }
-
- const parts = [];
- if (cA) parts.push(`Created ${MONTHS[curM]} = ${nf(cA.cur)} (${cA.change>=0?'+':''}${pct(cA.change,1)} vs ${MONTHS[curM-1]})`);
- if (pA) parts.push(`Paid Out ${MONTHS[curM]} = ${nf(pA.cur)} (${pA.change>=0?'+':''}${pct(pA.change,1)} vs ${MONTHS[curM-1]})`);
- const findings = parts.join('. ') + '.';
-
- const insightParts = [];
- [["Created", cA], ["Paid Out", pA]].forEach(([label, a]) => {
- if (!a) return;
- if (a.z == null) { insightParts.push(`${label}: belum cukup histori buat dinilai signifikansinya (butuh min. 3 bulan pembanding).`); return; }
- const v = zVerdict(a.z);
- insightParts.push(`${label}: perubahan ini ${v.text} dibanding pola fluktuasi bulan-bulan sebelumnya (z=${a.z.toFixed(2)}).`);
+ // Pull a metric's monthly array for one segment, respecting the channel filter where the metric
+ // supports a per-channel breakdown (created/paidOut/paidOutAmount do via the Lower Funnel log;
+ // eligible only exists at segment level, so it always ignores the channel filter).
+ function metricArr(seg, metric){
+ if (metric === "eligible") return TREND[seg] ? TREND[seg].eligible : null;
+ const trendKey = metric === "paidOut" ? "po" : metric;
+ if (allChSelected) return TREND[seg] ? TREND[seg][trendKey] : null;
+ const out = [0,1,2,3,4,5,6].map(mi => {
+ let t = 0, any = false;
+ f.ch.forEach(ch => {
+ const d = CHANNEL_DETAIL[seg] && CHANNEL_DETAIL[seg][ch];
+ const src = d && d[metric === "paidOut" ? "paidOut" : metric];
+ if (src && src[mi] != null) { t += src[mi]; any = true; }
  });
- const insight = insightParts.join(' ');
+ return any ? t : null;
+ });
+ return out;
+ }
 
- const anySignificant = [cA, pA].some(a => a && a.z != null && Math.abs(a.z) >= 1.96);
- const anyBadDrop = [cA, pA].some(a => a && a.z != null && a.z <= -1.96);
- let recommendation;
- if (anyBadDrop) recommendation = `Ada penurunan yang di luar kebiasaan - worth digali kenapa (channel tertentu drop? ada masalah teknis/kampanye berhenti?) sebelum diasumsikan cuma variasi biasa.`;
- else if (anySignificant) recommendation = `Ada perubahan di luar kebiasaan (ke arah positif) - cek apa ada faktor yang bisa direplikasi/diperbesar bulan depan.`;
- else recommendation = `Perubahan masih dalam rentang wajar - tidak perlu tindakan khusus, cukup pantau seperti biasa.`;
+ if (curM === 0) { el.innerHTML = firHtml("Bulan awal periode - belum ada bulan pembanding.","-","-"); return; }
 
- el.innerHTML = firHtml(findings, insight, recommendation);
+ const segAnalyses = list.map(seg => {
+ const metrics = SEGMENT_FOCUS_METRICS[seg] || ["created","paidOut","paidOutAmount"];
+ const metricResults = metrics.map(metric => {
+ const arr = metricArr(seg, metric);
+ if (!arr || arr[curM] == null) return null;
+ const cur = arr[curM], prev = arr[curM-1];
+ let change = null, z = null;
+ if (prev) {
+ change = (cur-prev)/prev;
+ const changes = []; for (let i=1;i<=curM;i++){ if (arr[i]!=null && arr[i-1]) changes.push((arr[i]-arr[i-1])/arr[i-1]); }
+ const zObj = zScoreVsHistory(change, changes.slice(0,-1));
+ z = zObj ? zObj.z : null;
+ }
+ const targetM = getTarget(seg, metric, curM+1);
+ const achievement = (targetM && cur!=null) ? cur/targetM : null;
+ return { metric, cur, prev, change, z, targetM, achievement };
+ }).filter(Boolean);
+ return { seg, metricResults };
+ }).filter(sa => sa.metricResults.length);
+
+ if (!segAnalyses.length) { el.innerHTML = firHtml("Tidak ada data yang cukup untuk dianalisis pada kombinasi filter ini.","-","-"); return; }
+
+ const fmtVal = (metric, v) => METRIC_IS_CURRENCY[metric] ? rp(v) : nf(v);
+ const findings = segAnalyses.map(sa => `${sa.seg}: ` + sa.metricResults.map(m =>
+ `${METRIC_LABEL[m.metric]} ${fmtVal(m.metric, m.cur)}${m.change!=null?` (${m.change>=0?'+':''}${pct(m.change,1)} vs ${MONTHS[curM-1]})`:''}${m.targetM!=null?`, ${pct(m.achievement,0)} dari target ${fmtVal(m.metric, m.targetM)}`:''}`
+ ).join(', ')
+ ).join('. ') + '.';
+
+ const insight = segAnalyses.map(sa => {
+ const parts = sa.metricResults.map(m => {
+ const bits = [];
+ if (m.z != null) bits.push(`vs bulan lalu ${zVerdict(m.z).text} (z=${m.z.toFixed(2)})`);
+ if (m.achievement != null) bits.push(`vs target ${achievementVerdict(m.achievement).text} (${pct(m.achievement,0)})`);
+ return bits.length ? `${METRIC_LABEL[m.metric]}: ${bits.join(', ')}` : null;
+ }).filter(Boolean);
+ return parts.length ? `${sa.seg} - ${parts.join('; ')}.` : null;
+ }).filter(Boolean).join(' ');
+
+ // Recommendation: for each segment, lead with the worst target-achievement metric (business
+ // urgency) and back it up with the momentum signal (z-tier) for how to act on it.
+ const recParts = segAnalyses.map(sa => {
+ const withTarget = sa.metricResults.filter(m => m.achievement != null);
+ const driver = withTarget.length
+ ? withTarget.sort((a,b) => a.achievement - b.achievement)[0]
+ : sa.metricResults.filter(m => m.z != null).sort((a,b) => Math.abs(b.z) - Math.abs(a.z))[0];
+ if (!driver) return null;
+ const mLabel = METRIC_LABEL[driver.metric];
+ if (driver.achievement != null) {
+ const av = achievementVerdict(driver.achievement);
+ if (av.level === "bad") return `${sa.seg}: ${mLabel} cuma ${pct(driver.achievement,0)} dari target - Action: butuh percepatan segera, naikkan volume kirim/budget ${mLabel === "Paid Out Amount" ? "atau tingkatkan nilai transaksi per lead" : ""} dan cek tahap funnel mana yang paling nge-bottleneck target ini.`;
+ if (av.level === "warn") return `${sa.seg}: ${mLabel} baru ${pct(driver.achievement,0)} dari target - Action: masih bisa dikejar sisa bulan ini, tapi mulai naikkan pace sekarang (+10-15%), jangan tunggu akhir bulan.`;
+ if (av.level === "info") return `${sa.seg}: ${mLabel} udah ${pct(driver.achievement,0)} dari target - Action: pertahankan pace saat ini, tinggal sedikit lagi buat capai target.`;
+ return `${sa.seg}: ${mLabel} udah capai target (${pct(driver.achievement,0)}) - Action: pertahankan strategi saat ini, pertimbangkan naikkan target bulan depan kalau konsisten.`;
+ }
+ const tier = zTier(driver.z);
+ if (tier === "strong" || tier === "significant") return driver.z > 0
+ ? `${sa.seg}: ${mLabel} naik di luar kebiasaan - Action: manfaatkan momentum, naikkan budget 10-20%.`
+ : `${sa.seg}: ${mLabel} turun di luar kebiasaan - Action: tahan budget, audit channel/funnel segmen ini.`;
+ if (tier === "watch") return driver.z > 0
+ ? `${sa.seg}: ${mLabel} mulai naik (belum signifikan) - Action: uji kecil dulu sebelum komit besar.`
+ : `${sa.seg}: ${mLabel} mulai turun (belum signifikan) - Action: investigasi dini.`;
+ return `${sa.seg}: ${mLabel} stabil - Action: pertahankan strategi saat ini.`;
+ }).filter(Boolean);
+
+ el.innerHTML = firHtml(findings, insight, recParts.join(' '));
 }
 
 // ===================== TREND CHART =====================
@@ -1632,25 +1706,63 @@ function renderTrendChart(f){
 
  const el = document.getElementById("trendFIR");
  if (!el) return;
- const rows = list.map(seg => {
- const arr = TREND[seg].created;
- const last = arr[6], prev = arr[5];
- if (last==null || !prev) return null;
- const change = (last-prev)/prev;
+ function trendMetricArr(seg, metric){
+ if (metric === "eligible") return TREND[seg].eligible;
+ if (metric === "paidOut") return TREND[seg].po;
+ if (metric === "paidOutAmount") return TREND[seg].paidOutAmount;
+ return TREND[seg].created;
+ }
+ const segAnalyses = list.map(seg => {
+ const metrics = SEGMENT_FOCUS_METRICS[seg] || ["created","paidOut","paidOutAmount"];
+ const metricResults = metrics.map(metric => {
+ const arr = trendMetricArr(seg, metric);
+ if (!arr || arr[6] == null || !arr[5]) return null;
+ const cur = arr[6], prev = arr[5];
+ const change = (cur-prev)/prev;
  const changes = []; for (let i=1;i<=5;i++){ if(arr[i]!=null && arr[i-1]) changes.push((arr[i]-arr[i-1])/arr[i-1]); }
  const zObj = zScoreVsHistory(change, changes);
- return { seg, last, change, z: zObj ? zObj.z : null };
+ const targetM = getTarget(seg, metric, 7);
+ const achievement = (targetM && cur!=null) ? cur/targetM : null;
+ return { metric, cur, prev, change, z: zObj?zObj.z:null, targetM, achievement };
  }).filter(Boolean);
- if (!rows.length) { el.innerHTML = firHtml("Belum ada data cukup untuk analisis tren per segmen.","-","-"); return; }
- const findings = rows.map(r => `${r.seg}: Created Jul ${nf(r.last)} (${r.change>=0?'+':''}${pct(r.change,1)} vs Jun)`).join('; ') + '.';
- const flagged = rows.filter(r => r.z != null && Math.abs(r.z) >= 1.96);
- const insight = flagged.length
- ? flagged.map(r => `${r.seg} bergerak di luar kebiasaan (z=${r.z.toFixed(2)}, ${zVerdict(r.z).text})`).join('; ') + '.'
- : `Semua segmen bergerak dalam rentang fluktuasi normalnya masing-masing (dibanding histori Jan-Jun).`;
- const recommendation = flagged.length
- ? `Fokus investigasi ke segmen yang di-flag di atas dulu - segmen lain nggak perlu tindakan khusus.`
- : `Nggak ada segmen yang butuh perhatian khusus bulan ini - lanjutkan strategi yang sama.`;
- el.innerHTML = firHtml(findings, insight, recommendation);
+ return { seg, metricResults };
+ }).filter(sa => sa.metricResults.length);
+ if (!segAnalyses.length) { el.innerHTML = firHtml("Belum ada data cukup untuk analisis tren per segmen.","-","-"); return; }
+
+ const fmtVal = (metric, v) => METRIC_IS_CURRENCY[metric] ? rp(v) : nf(v);
+ const findings = segAnalyses.map(sa => `${sa.seg}: ` + sa.metricResults.map(m =>
+ `${METRIC_LABEL[m.metric]} Jul ${fmtVal(m.metric, m.cur)} (${m.change>=0?'+':''}${pct(m.change,1)} vs Jun${m.targetM!=null?`, ${pct(m.achievement,0)} dari target`:''})`
+ ).join(', ')
+ ).join('. ') + '.';
+
+ const insight = segAnalyses.map(sa => sa.metricResults.map(m =>
+ `${sa.seg}/${METRIC_LABEL[m.metric]}: z=${m.z!=null?m.z.toFixed(2):'-'} (${m.z!=null?zVerdict(m.z).text:'belum cukup histori'})${m.achievement!=null?`, ${achievementVerdict(m.achievement).text}`:''}`
+ ).join('; ')).join(' ');
+
+ const recParts = segAnalyses.map(sa => {
+ const withTarget = sa.metricResults.filter(m => m.achievement != null);
+ const driver = withTarget.length ? withTarget.sort((a,b)=>a.achievement-b.achievement)[0]
+ : sa.metricResults.filter(m=>m.z!=null).sort((a,b)=>Math.abs(b.z)-Math.abs(a.z))[0];
+ if (!driver) return null;
+ const mLabel = METRIC_LABEL[driver.metric];
+ if (driver.achievement != null) {
+ const av = achievementVerdict(driver.achievement);
+ if (av.level === "bad") return `${sa.seg}: ${mLabel} cuma ${pct(driver.achievement,0)} dari target Jul - Action: percepat sekarang, naikkan budget/volume kirim dan cek tahap funnel yang macet.`;
+ if (av.level === "warn") return `${sa.seg}: ${mLabel} ${pct(driver.achievement,0)} dari target - Action: masih bisa dikejar, naikkan pace +10-15%.`;
+ if (av.level === "info") return `${sa.seg}: ${mLabel} ${pct(driver.achievement,0)} dari target - Action: pertahankan pace, hampir sampai.`;
+ return `${sa.seg}: ${mLabel} sudah capai target (${pct(driver.achievement,0)}) - Action: pertahankan, pertimbangkan naikkan target berikutnya.`;
+ }
+ const tier = zTier(driver.z);
+ if (tier === "strong" || tier === "significant") return driver.z > 0
+ ? `${sa.seg}: ${mLabel} naik di luar kebiasaan - Action: naikkan budget 10-20% selagi momentum masih ada.`
+ : `${sa.seg}: ${mLabel} turun di luar kebiasaan - Action: tahan budget, audit channel &amp; tahap funnel yang macet.`;
+ if (tier === "watch") return driver.z > 0
+ ? `${sa.seg}: ${mLabel} mulai naik (belum signifikan) - Action: uji kecil dulu sebelum komit besar.`
+ : `${sa.seg}: ${mLabel} mulai turun (belum signifikan) - Action: investigasi dini.`;
+ return `${sa.seg}: ${mLabel} stabil - Action: pertahankan strategi saat ini.`;
+ }).filter(Boolean);
+
+ el.innerHTML = firHtml(findings, insight, recParts.join(' '));
 }
 
 // ===================== BULAN COMPARISON BAR =====================
@@ -1764,11 +1876,25 @@ function renderChannelEngageChart(f){
  }
  const findings = `Delivery rate: ${pct(delivTest.p2,2)} (Jun) → ${pct(delivTest.p1,2)} (Jul). Click rate (dari Sent): ${pct(clickTest.p2,2)} (Jun) → ${pct(clickTest.p1,2)} (Jul).${readPart}`;
  const insight = `Perubahan delivery rate ${delivV.text} (z=${delivTest.z.toFixed(2)}). Perubahan click rate ${clickV.text} (z=${clickTest.z.toFixed(2)}).`;
+ const delivTier = zTier(delivTest.z), clickTier = zTier(clickTest.z);
  let recommendation;
- if (delivTest.z <= -1.96) recommendation = `Delivery rate turun signifikan - kemungkinan ada masalah kualitas nomor/kontak atau kebijakan provider (WhatsApp/Email) yang berubah, cek dulu sebelum nambah volume kirim.`;
- else if (clickTest.z <= -1.96) recommendation = `Click rate turun signifikan walau delivery normal - kemungkinan soal konten/relevansi pesan, bukan soal teknis pengiriman.`;
- else if (clickTest.z >= 1.96) recommendation = `Click rate naik signifikan - coba identifikasi apa yang beda (waktu kirim, konten, segmentasi) buat direplikasi.`;
- else recommendation = `Engagement rate masih stabil - tidak ada tindakan mendesak.`;
+ if (delivTier === "strong" || delivTier === "significant") {
+ recommendation = delivTest.z < 0
+ ? `Delivery rate turun ${delivV.level==='bad'?'tajam':'signifikan'} - Action: (1) audit kualitas nomor/kontak (cek bounce/invalid rate), (2) cek apakah ada perubahan kebijakan dari provider WhatsApp/Email, (3) TAHAN dulu penambahan volume kirim sampai delivery rate pulih - nambah volume saat delivery jelek cuma buang cost.`
+ : `Delivery rate naik signifikan - Action: pertahankan setup pengiriman saat ini, aman buat nambah volume kirim.`;
+ } else if (clickTier === "strong" || clickTier === "significant") {
+ recommendation = clickTest.z < 0
+ ? `Click rate turun signifikan walau delivery normal - Action: ini soal konten/relevansi, bukan teknis. Ganti konten pesan atau waktu kirim, coba A/B test 2 varian konten minggu depan.`
+ : `Click rate naik signifikan - Action: identifikasi apa yang beda (waktu kirim, konten, segmentasi audiens) dan replikasi ke channel/segmen lain.`;
+ } else if (delivTier === "watch" || clickTier === "watch") {
+ const which = delivTier === "watch" ? "Delivery rate" : "Click rate";
+ const dir = delivTier === "watch" ? delivTest.z : clickTest.z;
+ recommendation = dir < 0
+ ? `${which} mulai menurun (belum signifikan) - Action: mulai pantau harian, siapkan rencana cadangan (ganti konten/waktu kirim) kalau trennya berlanjut minggu depan.`
+ : `${which} mulai membaik (belum signifikan) - Action: pantau 1-2 siklus lagi sebelum menyimpulkan ini perbaikan permanen.`;
+ } else {
+ recommendation = `Engagement rate masih stabil - Action: tidak ada tindakan mendesak, lanjutkan strategi konten &amp; jadwal kirim saat ini.`;
+ }
  el.innerHTML = firHtml(findings, insight, recommendation);
  }
  }
@@ -1807,13 +1933,25 @@ function renderCpaChart(f){
  if (!rows.length) { el.innerHTML = firHtml("Data CPA belum lengkap untuk dibandingkan.","-","-"); }
  else {
  const findings = rows.map(r => `${r.seg}: CPA ${rp(r.jun)} (Jun) → ${rp(r.jul)} (Jul), ${r.change>=0?'+':''}${pct(r.change,1)}`).join('; ') + '.';
- const flagged = rows.filter(r => Math.abs(r.change) > 0.3);
- const insight = `Cuma ada 2 titik data (Jun, Jul), jadi belum bisa dijalanin uji signifikansi statistik beneran (butuh min. 3 titik buat estimasi variasi normal) - jadi di sini dipakai ambang batas materialitas 30% sebagai gantinya.` +
- (flagged.length ? ` ${flagged.map(r=>r.seg).join(', ')} berubah lebih dari itu, patut diperhatikan.` : ` Tidak ada segmen yang berubah signifikan berdasar ambang itu.`);
- const recommendation = flagged.some(r=>r.change>0.3)
- ? `CPA naik tajam di ${flagged.filter(r=>r.change>0.3).map(r=>r.seg).join(', ')} - audit channel/campaign di segmen itu sebelum nambah budget lebih jauh.`
- : (flagged.some(r=>r.change<-0.3) ? `CPA turun tajam di ${flagged.filter(r=>r.change<-0.3).map(r=>r.seg).join(', ')} - kesempatan bagus buat nambah budget di situ selama volume/kualitas Paid Out tetap terjaga.` : `CPA relatif stabil - alokasi budget saat ini masih wajar dipertahankan.`);
- el.innerHTML = firHtml(findings, insight, recommendation);
+ // Only 2 data points -> no real z-test possible (need >=3 for a variance estimate). Use tiered
+ // materiality bands instead: >30% = act now, 15-30% = watch, <15% = stable.
+ rows.forEach(r => { const a = Math.abs(r.change); r.tier = a > 0.3 ? "strong" : (a > 0.15 ? "watch" : "stable"); });
+ const acted = rows.filter(r => r.tier === "strong");
+ const watching = rows.filter(r => r.tier === "watch");
+ const insight = `Cuma ada 2 titik data (Jun, Jul), jadi belum bisa dijalanin uji signifikansi statistik beneran (butuh min. 3 titik buat estimasi variasi normal) - jadi dipakai ambang materialitas bertingkat (>30% = perlu tindakan, 15-30% = waspada) sebagai gantinya.` +
+ (acted.length ? ` ${acted.map(r=>r.seg).join(', ')} berubah >30%.` : '') +
+ (watching.length ? ` ${watching.map(r=>r.seg).join(', ')} di zona waspada (15-30%).` : '') +
+ (!acted.length && !watching.length ? ` Semua segmen di bawah 15%, relatif stabil.` : '');
+ const recParts = [];
+ acted.forEach(r => recParts.push(r.change > 0
+ ? `${r.seg}: CPA naik tajam - Action: audit channel/campaign di segmen ini SEKARANG, tahan penambahan budget sampai ketahuan penyebabnya (biaya per-klik naik? conversion rate turun?).`
+ : `${r.seg}: CPA turun tajam - Action: kesempatan bagus, naikkan budget 15-20% di segmen ini selama volume &amp; kualitas Paid Out tetap terjaga.`));
+ watching.forEach(r => recParts.push(r.change > 0
+ ? `${r.seg}: CPA mulai naik (belum >30%) - Action: pantau minggu depan, siapkan rencana audit kalau berlanjut naik.`
+ : `${r.seg}: CPA mulai turun (belum >30%) - Action: belum perlu aksi besar, catat sebagai kandidat penambahan budget kalau trennya konsisten.`));
+ const stableSegs = rows.filter(r => r.tier === "stable").map(r => r.seg);
+ if (stableSegs.length) recParts.push(`${stableSegs.join(', ')}: stabil - Action: alokasi budget saat ini masih wajar, pertahankan.`);
+ el.innerHTML = firHtml(findings, insight, recParts.join(' '));
  }
  }
 }
@@ -1858,12 +1996,14 @@ function renderBudgetChart(f){
  if (firEl) {
  const variancePct = totalBase ? (totalDownside-totalBase)/totalBase : 0;
  const findings = `Basis budget (pakai CPA Jun) = ${rpJt(totalBase)}. Skenario downside (pakai CPA Jul) = ${rpJt(totalDownside)} (${variancePct>=0?'+':''}${pct(variancePct,1)}).`;
- const insight = Math.abs(variancePct) > 0.3
- ? `Selisih antar-skenario cukup besar (>30%) - berarti angka budget ini sensitif banget terhadap asumsi CPA yang dipakai, bukan angka yang solid.`
- : `Selisih antar-skenario relatif kecil (<30%) - basis budget ini cukup stabil terhadap perubahan CPA bulan ke bulan.`;
- const recommendation = Math.abs(variancePct) > 0.3
- ? `Jangan komit ke satu angka budget doang - siapkan buffer atau approval bertahap, dan pantau CPA aktual minggu-minggu awal Agustus buat re-kalibrasi cepat kalau ternyata lebih dekat ke skenario downside.`
- : `Budget basis ini cukup aman dipakai sebagai acuan pengajuan, risiko meleset jauh relatif kecil.`;
+ const absV = Math.abs(variancePct);
+ const tier = absV > 0.3 ? "strong" : (absV > 0.15 ? "watch" : "stable");
+ const insight = tier === "strong"
+ ? `Selisih antar-skenario besar (>30%) - angka budget ini sensitif banget terhadap asumsi CPA yang dipakai, bukan angka yang solid.`
+ : (tier === "watch" ? `Selisih antar-skenario di zona waspada (15-30%) - lumayan sensitif terhadap asumsi CPA.` : `Selisih antar-skenario kecil (<15%) - basis budget ini cukup stabil terhadap perubahan CPA bulan ke bulan.`);
+ const recommendation = tier === "strong"
+ ? `Action: JANGAN komit ke satu angka budget doang - ajukan dengan buffer ${pct(absV,0)} atau minta approval bertahap (cair sebagian dulu), dan pantau CPA aktual di 1-2 minggu pertama Agustus buat re-kalibrasi cepat.`
+ : (tier === "watch" ? `Action: ajukan basis budget ini tapi siapkan buffer kecil (~10-15%) buat jaga-jaga, review lagi pertengahan Agustus.` : `Action: budget basis ini aman dipakai langsung sebagai acuan pengajuan, risiko meleset jauh relatif kecil.`);
  firEl.innerHTML = firHtml(findings, insight, recommendation);
  }
 }
@@ -1916,9 +2056,19 @@ function funnelRatioFIR(list, uptoMonth){
  const v = zVerdict(test.z);
  const findings = `Rasio Paid Out/Created bulan ${MONTHS[lastM]} = ${pct(test.p1,2)} (${nf(curPO)}/${nf(curCreated)}), dibanding rata-rata bulan-bulan sebelumnya ${pct(test.p2,2)} (${nf(priorPO)}/${nf(priorCreated)}).`;
  const insight = `Selisih ini ${v.text} secara statistik (two-proportion z-test, z=${test.z.toFixed(2)}) - artinya ${Math.abs(test.z)>=1.96 ? 'kemungkinan besar ada penyebab nyata (bukan kebetulan sample), ' : 'kemungkinan besar cuma variasi wajar dari bulan ke bulan, '}mengingat ukuran sample datanya.`;
- const recommendation = test.z <= -1.96
- ? `Conversion rate turun signifikan - cek tahapan mana di funnel yang macet (After FF, Eligible, atau Accepted) sebelum nyalahin channel/campaign.`
- : (test.z >= 1.96 ? `Conversion rate naik signifikan - identifikasi apa yang beda bulan ini (channel, campaign, targeting) biar bisa direplikasi.` : `Nggak perlu investigasi khusus - rasio konversi masih stabil secara statistik.`);
+ const tier = zTier(test.z);
+ let recommendation;
+ if (tier === "strong" || tier === "significant") {
+ recommendation = test.z < 0
+ ? `Conversion rate turun ${v.level==='bad'?'tajam':'signifikan'} - Action: (1) buka tabel di atas, cek pp-deviation tiap tahap (First Filter/Eligible/Accepted/Paid Out) buat nemuin tahap yang paling anjlok, (2) tahan penambahan volume kirim sampai tahap itu diperbaiki, (3) kalau After FF yang drop → cek kualitas lead/targeting; kalau Accepted→Paid Out yang drop → cek proses approval/verifikasi.`
+ : `Conversion rate naik signifikan - Action: identifikasi apa yang beda bulan ini (channel, campaign, kriteria targeting) dan replikasi ke segmen/bulan berikutnya sebelum efeknya hilang. Pertimbangkan naikkan volume kirim 10-15% selagi rate-nya lagi bagus.`;
+ } else if (tier === "watch") {
+ recommendation = test.z < 0
+ ? `Ada indikasi conversion rate mulai turun (belum signifikan penuh) - Action: cek tabel pp-deviation per tahap sekarang, jangan tunggu sampai signifikan - lebih murah investigasi dini daripada telat.`
+ : `Ada indikasi conversion rate mulai naik (belum signifikan penuh) - Action: pantau 1 bulan lagi buat konfirmasi sebelum realokasi budget besar-besaran.`;
+ } else {
+ recommendation = `Rasio konversi stabil - Action: alokasi budget saat ini masih proporsional, tidak perlu perubahan.`;
+ }
  el.innerHTML = firHtml(findings, insight, recommendation);
 }
 
@@ -2041,9 +2191,15 @@ function renderChannelDetailTable(f){
  const v = zVerdict(test.z);
  const findings = `Click rate tertinggi: ${best.ch} (${pct(best.rate,2)}). Click rate terendah: ${worst.ch} (${pct(worst.rate,2)}).`;
  const insight = `Selisih antara ${best.ch} dan ${worst.ch} ${v.text} (two-proportion z-test, z=${test.z.toFixed(2)}).`;
- const recommendation = Math.abs(test.z) >= 1.96
- ? `Perbedaan performa antar-channel ini nyata secara statistik - worth geser sebagian budget/effort dari ${worst.ch} ke ${best.ch}, atau audit konten/targeting ${worst.ch}.`
- : `Perbedaan antar-channel belum cukup besar buat dibilang satu channel "lebih baik" secara statistik - jangan buru-buru realokasi budget cuma dari angka ini.`;
+ const tier = zTier(test.z);
+ let recommendation;
+ if (tier === "strong" || tier === "significant") {
+ recommendation = `Perbedaan performa antar-channel ini nyata secara statistik - Action: geser 15-20% budget/effort dari ${worst.ch} ke ${best.ch}, DAN paralel audit konten/targeting ${worst.ch} (bukan langsung ditinggalkan, cari tahu dulu akar masalahnya).`;
+ } else if (tier === "watch") {
+ recommendation = `Ada indikasi ${best.ch} lebih unggul dari ${worst.ch} (belum signifikan penuh) - Action: uji kecil dulu (geser 5-10% budget) sebelum realokasi besar.`;
+ } else {
+ recommendation = `Perbedaan antar-channel belum cukup besar buat dibilang satu channel "lebih baik" secara statistik - Action: jangan realokasi budget cuma dari angka ini, pertahankan alokasi saat ini.`;
+ }
  el.innerHTML = firHtml(findings, insight, recommendation);
  }
  }
@@ -2117,10 +2273,10 @@ function renderCostByChannelTable(f){
  const findings = `${topCh} menyerap ${pct(share,1)} dari total cost (${rp(topVal)} dari ${rp(grand)})${sorted.length>1?`; channel lain: ${sorted.slice(1).map(([c,v])=>`${c} ${pct(v/grand,1)}`).join(', ')}`:''}.`;
  const insight = share > 0.7
  ? `Konsentrasi spend sangat tinggi di satu channel (>70%) - portofolio channel ini nggak terdiversifikasi, risikonya numpuk di satu titik.`
- : (share > 0.5 ? `Lebih dari separuh spend ada di satu channel - masih relatif terkonsentrasi.` : `Spend tersebar cukup merata antar-channel.`);
+ : (share > 0.5 ? `Lebih dari separuh spend ada di satu channel (50-70%) - masih relatif terkonsentrasi, belum ekstrem tapi worth diperhatikan.` : `Spend tersebar cukup merata antar-channel.`);
  const recommendation = share > 0.7
- ? `Pertimbangkan uji coba alokasi ke channel lain dalam skala kecil, biar nggak terlalu bergantung ke ${topCh} kalau ada gangguan (rate card berubah, delivery drop, dll).`
- : `Distribusi spend saat ini masih sehat - nggak ada urgensi diversifikasi lebih jauh.`;
+ ? `Action: alokasikan 10-15% spend ke channel lain sebagai uji coba, biar nggak terlalu bergantung ke ${topCh} kalau ada gangguan (rate card berubah, delivery drop, kebijakan provider berubah, dll).`
+ : (share > 0.5 ? `Action: belum darurat, tapi mulai eksplorasi channel kedua secara bertahap (5-10% spend) sebagai diversifikasi jangka menengah.` : `Action: distribusi spend saat ini sehat - tidak ada urgensi diversifikasi lebih jauh.`);
  firEl.innerHTML = firHtml(findings, insight, recommendation);
  }
  }
@@ -2262,11 +2418,22 @@ function renderCostRatioTable(f){
  const rJun = junCost/junAmt, rJul = julCost/julAmt;
  const change = (rJul-rJun)/rJun;
  const findings = `Cost Ratio (pooled, segmen terpilih): ${pct(rJun,2)} (Jun) → ${pct(rJul,2)} (Jul), ${change>=0?'+':''}${pct(change,1)}. Return (Paid Out Amount / Cost): ${(1/rJun).toFixed(1)}x → ${(1/rJul).toFixed(1)}x.`;
- const insight = `Cuma 2 titik data (Jun, Jul) - belum bisa diuji signifikansi statistiknya secara formal, jadi dipakai ambang materialitas 20% buat nilai "berubah cukup besar atau nggak".` +
- (Math.abs(change) > 0.2 ? ` Perubahan ${pct(Math.abs(change),1)} ini di atas ambang itu.` : ` Perubahan masih di bawah ambang itu, relatif stabil.`);
- const recommendation = change > 0.2
- ? `Efisiensi spend memburuk (cost per rupiah payout naik) - cek apa ini karena CPA naik atau memang volume payout turun, sebelum nambah budget lebih jauh.`
- : (change < -0.2 ? `Efisiensi spend membaik - kondisi bagus buat pertimbangkan nambah budget selama tren ini konsisten.` : `Efisiensi spend relatif stabil - nggak ada tindakan mendesak dari sisi ini.`);
+ const absC = Math.abs(change);
+ const tier = absC > 0.2 ? "strong" : (absC > 0.1 ? "watch" : "stable");
+ const insight = `Cuma 2 titik data (Jun, Jul) - belum bisa diuji signifikansi statistiknya secara formal, jadi dipakai ambang materialitas bertingkat (>20% = perlu tindakan, 10-20% = waspada).` +
+ (tier === "strong" ? ` Perubahan ${pct(absC,1)} ini di atas ambang tindakan.` : (tier === "watch" ? ` Perubahan ${pct(absC,1)} ini di zona waspada.` : ` Perubahan masih di bawah 10%, relatif stabil.`));
+ let recommendation;
+ if (tier === "strong") {
+ recommendation = change > 0
+ ? `Efisiensi spend memburuk signifikan - Action: cek dulu apa penyebabnya CPA naik atau volume payout turun (buka chart CPA di atas), lalu TAHAN penambahan budget sampai ketahuan akar masalahnya.`
+ : `Efisiensi spend membaik signifikan - Action: naikkan budget 15-20% selama tren ini konsisten di bulan berikutnya, manfaatkan efisiensi yang lagi bagus ini.`;
+ } else if (tier === "watch") {
+ recommendation = change > 0
+ ? `Efisiensi mulai memburuk (belum >20%) - Action: mulai pantau CPA per-segmen mingguan, siapkan rencana audit kalau berlanjut.`
+ : `Efisiensi mulai membaik (belum >20%) - Action: catat sebagai kandidat penambahan budget, konfirmasi dulu di bulan berikutnya.`;
+ } else {
+ recommendation = `Efisiensi spend stabil - Action: tidak ada tindakan mendesak, pertahankan alokasi saat ini.`;
+ }
  firEl.innerHTML = firHtml(findings, insight, recommendation);
  }
  }
