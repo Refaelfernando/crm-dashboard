@@ -435,53 +435,149 @@ const SHEET_ID = "1gdUPT9xcT0xXKBBlFHUXhTIqDBAd1tdbk10VohmIo6c";
 const CSV_URL = (sheetName) => `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(sheetName)}`;
 const JUL_MODE = { "New": "forecast", "Repeat+TopUp": "forecast", "LMT": "actual" }; // Jul: forecast (masih berjalan) vs actual (aktivitas sudah dihentikan)
 
-const LOWER_ROWS = {
- "New": { created:5, afterFF:9, eligible:13, accepted:17, paidOut:25, paidOutAmount:29 },
- "Repeat+TopUp": { created:38, afterFF:42, accepted:46, paidOut:54, paidOutAmount:58 },
- "LMT": { created:69, afterFF:73, accepted:77, paidOut:85, paidOutAmount:89 },
-};
-const LOWER_SUB_OFFSET = { target:0, actual:1, achievement:2, avgDaily:3, forecast:4, achv:5 };
-const UPPER_ROWS = {
- "New": { WhatsApp:{sent:6,delivered:7,click:9,created:14}, Email:{sent:20,delivered:21,click:23}, Push:{sent:32,delivered:33,click:34} },
- "Repeat+TopUp": { WhatsApp:{sent:44,delivered:45,click:47,created:52}, Email:{sent:58,delivered:59,click:61}, Push:{sent:70,delivered:71,click:72} },
- "LMT": { WhatsApp:{sent:81,delivered:82,click:84}, Email:{sent:93,delivered:94,click:96}, Push:{sent:105,delivered:106,click:107} },
-};
-const COST_ROWS = {
- "New": { WhatsApp:2, Email:5, Total:8 },
- "Repeat+TopUp": { WhatsApp:3, Email:6, Total:9 },
- "LMT": { WhatsApp:4, Email:7, Total:10 },
-};
-
-function cellAt(rows, row1, col1){
- const r = rows[row1-1];
- if(!r) return null;
- let v = r[col1-1];
- if(v === undefined || v === null || v === "") return null;
- const n = Number(String(v).replace(/,/g,""));
+// ---- DYNAMIC LABEL-BASED ROW LOOKUP -----------------------------------------------------
+// Row numbers are NOT hardcoded anymore. Two real-world issues forced this:
+// 1) Google's gviz CSV export silently drops fully-empty rows, shifting every row index below
+//    the empty row by however many empty rows were skipped (verified: an empty row 2 in
+//    "Upper Funnel" made "Sent" land on CSV row 5 instead of sheet row 6).
+// 2) "Lower Funnel" groups each metric into 4 sub-rows (WhatsApp / Email / Push Notification /
+//    Total) - the correct segment-level number is always the "Total" sub-row, not the first one.
+// Locating rows by their visible text label instead of a fixed row number is immune to both
+// problems, and also survives future row insertions/deletions in the sheet.
+function cellText(rows, row0, col1){
+ const r = rows[row0];
+ if (!r) return "";
+ const v = r[col1 - 1];
+ return (v == null) ? "" : String(v).trim();
+}
+function valAt(rows, row0, col1){
+ const r = rows[row0];
+ if (!r) return null;
+ const v = r[col1 - 1];
+ if (v === undefined || v === null || v === "") return null;
+ const n = Number(String(v).replace(/,/g, ""));
  return isNaN(n) ? null : n;
 }
-function lowerVal(rows, seg, metric, month, sub){
- const row = LOWER_ROWS[seg][metric];
- if(!row) return null;
- const col = 3 + 6*(month-1) + LOWER_SUB_OFFSET[sub];
- return cellAt(rows, row, col);
+function findLabelRow(rows, label, fromRow0, toRow0){
+ const target = label.toLowerCase();
+ const end = Math.min(toRow0, rows.length);
+ for (let i = fromRow0; i < end; i++) {
+ if (cellText(rows, i, 1).toLowerCase() === target) return i;
+ }
+ return -1;
 }
-function upperVal(rows, seg, ch, metric, month){
- const row = UPPER_ROWS[seg][ch][metric];
- if (!row) return null;
+
+const UPPER_SEG_LABEL = { "New": "New", "Repeat+TopUp": "Repeat + Top Up", "LMT": "Repeat LMT" };
+const UPPER_CH_LABELS = ["Whatsapp", "Email", "Push Notification"];
+const UPPER_CH_KEY = { "Whatsapp": "WhatsApp", "Email": "Email", "Push Notification": "Push" };
+
+const LOWER_SEG_LABEL = { "New": "Target New 2026", "Repeat+TopUp": "Target Repeat PDF 2026", "LMT": "Target Repeat LMT 2026" };
+const LOWER_STAGE_LABEL = { created: "Created", afterFF: "After FF", eligible: "Eligible", accepted: "Accepted", paidOut: "Paid out", paidOutAmount: "Paid out Amount" };
+const LOWER_SUB_OFFSET = { target:0, actual:1, achievement:2, avgDaily:3, forecast:4, achv:5 };
+
+const COST_SEG_LABEL = { "New": "New", "Repeat+TopUp": "Repeat + Top Up", "LMT": "LMT" };
+
+function buildUpperIndex(rows){
+ const segKeys = Object.keys(UPPER_SEG_LABEL);
+ const segStart = {};
+ segKeys.forEach(k => { segStart[k] = findLabelRow(rows, UPPER_SEG_LABEL[k], 0, rows.length); });
+ const idx = {};
+ segKeys.forEach(segKey => {
+ const start = segStart[segKey];
+ if (start < 0) { idx[segKey] = null; return; }
+ let end = rows.length;
+ segKeys.forEach(o => { const s = segStart[o]; if (o !== segKey && s > start && s < end) end = s; });
+ idx[segKey] = {};
+ UPPER_CH_LABELS.forEach(chLabel => {
+ const chStart = findLabelRow(rows, chLabel, start, end);
+ if (chStart < 0) { idx[segKey][UPPER_CH_KEY[chLabel]] = null; return; }
+ let chEnd = end;
+ UPPER_CH_LABELS.forEach(o => { if (o !== chLabel) { const s = findLabelRow(rows, o, chStart + 1, end); if (s >= 0 && s < chEnd) chEnd = s; } });
+ const funnelHdr = findLabelRow(rows, "Funnel", chStart, chEnd);
+ const from = funnelHdr >= 0 ? funnelHdr + 1 : chStart;
+ let clickRow = findLabelRow(rows, "Click", from, chEnd);
+ if (clickRow < 0) clickRow = findLabelRow(rows, "Click / Open", from, chEnd);
+ idx[segKey][UPPER_CH_KEY[chLabel]] = {
+ sent: findLabelRow(rows, "Sent", from, chEnd),
+ delivered: findLabelRow(rows, "Delivered", from, chEnd),
+ click: clickRow,
+ created: findLabelRow(rows, "Created", from, chEnd),
+ };
+ });
+ });
+ return idx;
+}
+
+function buildLowerIndex(rows){
+ const segKeys = Object.keys(LOWER_SEG_LABEL);
+ const segStart = {};
+ segKeys.forEach(k => { segStart[k] = findLabelRow(rows, LOWER_SEG_LABEL[k], 0, rows.length); });
+ const idx = {};
+ segKeys.forEach(segKey => {
+ const start = segStart[segKey];
+ if (start < 0) { idx[segKey] = null; return; }
+ let end = rows.length;
+ segKeys.forEach(o => { const s = segStart[o]; if (o !== segKey && s > start && s < end) end = s; });
+ idx[segKey] = {};
+ Object.keys(LOWER_STAGE_LABEL).forEach(stageKey => {
+ const label = LOWER_STAGE_LABEL[stageKey];
+ const stageRow = findLabelRow(rows, label, start, end);
+ let totalRow = -1;
+ if (stageRow >= 0) {
+ for (let i = stageRow; i < Math.min(stageRow + 6, end); i++) {
+ if (cellText(rows, i, 2).toLowerCase() === "total") { totalRow = i; break; }
+ }
+ }
+ idx[segKey][stageKey] = totalRow;
+ });
+ });
+ return idx;
+}
+
+function buildCostIndex(rows){
+ const idx = {};
+ Object.keys(COST_SEG_LABEL).forEach(segKey => {
+ const segLabel = COST_SEG_LABEL[segKey];
+ const find = (costLabel) => {
+ for (let i = 0; i < rows.length; i++) {
+ if (cellText(rows, i, 1) === costLabel && cellText(rows, i, 2) === segLabel) return i;
+ }
+ return -1;
+ };
+ idx[segKey] = { WhatsApp: find("Total Cost Whatsapp"), Email: find("Total Cost Email"), Total: find("Total Cost") };
+ });
+ return idx;
+}
+
+function lowerVal(lowerRows, lowerIdx, seg, metric, month, sub){
+ const segIdx = lowerIdx[seg];
+ if (!segIdx) return null;
+ const row0 = segIdx[metric];
+ if (row0 == null || row0 < 0) return null;
+ const col = 3 + 6 * (month - 1) + LOWER_SUB_OFFSET[sub];
+ return valAt(lowerRows, row0, col);
+}
+function upperVal(upperRows, upperIdx, seg, ch, metric, month){
+ const segIdx = upperIdx[seg];
+ if (!segIdx || !segIdx[ch]) return null;
+ const row0 = segIdx[ch][metric];
+ if (row0 == null || row0 < 0) return null;
  const col = 1 + month;
- return cellAt(rows, row, col);
+ return valAt(upperRows, row0, col);
 }
-function costVal(rows, seg, type, month){
- const row = COST_ROWS[seg][type];
+function costVal(costRows, costIdx, seg, type, month){
+ const segIdx = costIdx[seg];
+ if (!segIdx) return null;
+ const row0 = segIdx[type];
+ if (row0 == null || row0 < 0) return null;
  const col = 2 + month;
- return cellAt(rows, row, col);
+ return valAt(costRows, row0, col);
 }
-function julCostDisplay(costRows, lowerRows, seg){
- const costActual = costVal(costRows, seg, "Total", 7);
+function julCostDisplay(costRows, costIdx, lowerRows, lowerIdx, seg){
+ const costActual = costVal(costRows, costIdx, seg, "Total", 7);
  if (JUL_MODE[seg] === "actual") return costActual;
- const poActual = lowerVal(lowerRows, seg, "paidOut", 7, "actual");
- const poForecast = lowerVal(lowerRows, seg, "paidOut", 7, "forecast");
+ const poActual = lowerVal(lowerRows, lowerIdx, seg, "paidOut", 7, "actual");
+ const poForecast = lowerVal(lowerRows, lowerIdx, seg, "paidOut", 7, "forecast");
  if (!poActual) return costActual;
  return costActual * (poForecast / poActual);
 }
@@ -523,6 +619,10 @@ async function fetchSheetCSV(sheetName){
 
 function computeFromSheets(lowerRows, upperRows, costRows){
  const SEGS = ["New","Repeat+TopUp","LMT"];
+ const lowerIdx = buildLowerIndex(lowerRows);
+ const upperIdx = buildUpperIndex(upperRows);
+ const costIdx = buildCostIndex(costRows);
+
  const trend = {}, cost = {}, cpa = {}, poAmountCost = {}, budgetAug = {};
  const channelEngage = {}, channelDetail = {}, costByChannel = {};
 
@@ -531,26 +631,26 @@ function computeFromSheets(lowerRows, upperRows, costRows){
  const created = [], po = [];
  for (let m = 1; m <= 7; m++) {
  if (m === 7 && JUL_MODE[seg] === "forecast") {
- created.push(lowerVal(lowerRows, seg, "created", 7, "forecast"));
- po.push(lowerVal(lowerRows, seg, "paidOut", 7, "forecast"));
+ created.push(lowerVal(lowerRows, lowerIdx, seg, "created", 7, "forecast"));
+ po.push(lowerVal(lowerRows, lowerIdx, seg, "paidOut", 7, "forecast"));
  } else {
- created.push(lowerVal(lowerRows, seg, "created", m, "actual"));
- po.push(lowerVal(lowerRows, seg, "paidOut", m, "actual"));
+ created.push(lowerVal(lowerRows, lowerIdx, seg, "created", m, "actual"));
+ po.push(lowerVal(lowerRows, lowerIdx, seg, "paidOut", m, "actual"));
  }
  }
  trend[seg] = { created, po, julLabel: JUL_MODE[seg] === "forecast" ? "forecast" : "aktual final" };
 
  // ---- COST: always actual, Jan..Jul ----
- cost[seg] = [1,2,3,4,5,6,7].map(m => costVal(costRows, seg, "Total", m));
+ cost[seg] = [1,2,3,4,5,6,7].map(m => costVal(costRows, costIdx, seg, "Total", m));
 
  // ---- Funnel stages (afterFF, eligible[New only], accepted), Jan..Jul, respecting JUL_MODE ----
- const hasEligible = LOWER_ROWS[seg].eligible !== undefined;
+ const hasEligible = lowerIdx[seg] && lowerIdx[seg].eligible >= 0;
  const afterFF = [], eligible = hasEligible ? [] : null, accepted = [];
  for (let m = 1; m <= 7; m++) {
  const sub = (m === 7 && JUL_MODE[seg] === "forecast") ? "forecast" : "actual";
- afterFF.push(lowerVal(lowerRows, seg, "afterFF", m, sub));
- if (hasEligible) eligible.push(lowerVal(lowerRows, seg, "eligible", m, sub));
- accepted.push(lowerVal(lowerRows, seg, "accepted", m, sub));
+ afterFF.push(lowerVal(lowerRows, lowerIdx, seg, "afterFF", m, sub));
+ if (hasEligible) eligible.push(lowerVal(lowerRows, lowerIdx, seg, "eligible", m, sub));
+ accepted.push(lowerVal(lowerRows, lowerIdx, seg, "accepted", m, sub));
  }
  trend[seg].afterFF = afterFF;
  trend[seg].eligible = eligible;
@@ -559,43 +659,43 @@ function computeFromSheets(lowerRows, upperRows, costRows){
  // ---- Channel detail: Sent/Delivered/Click/Created per channel, Jan..Jul ----
  channelDetail[seg] = {};
  ["WhatsApp","Email","Push"].forEach(ch => {
- const hasCreated = !!(UPPER_ROWS[seg][ch] && UPPER_ROWS[seg][ch].created);
+ const hasCreated = !!(upperIdx[seg] && upperIdx[seg][ch] && upperIdx[seg][ch].created >= 0);
  const sent=[], delivered=[], click=[], created = hasCreated ? [] : null;
  for (let m = 1; m <= 7; m++) {
- sent.push(upperVal(upperRows, seg, ch, "sent", m));
- delivered.push(upperVal(upperRows, seg, ch, "delivered", m));
- click.push(upperVal(upperRows, seg, ch, "click", m));
- if (hasCreated) created.push(upperVal(upperRows, seg, ch, "created", m));
+ sent.push(upperVal(upperRows, upperIdx, seg, ch, "sent", m));
+ delivered.push(upperVal(upperRows, upperIdx, seg, ch, "delivered", m));
+ click.push(upperVal(upperRows, upperIdx, seg, ch, "click", m));
+ if (hasCreated) created.push(upperVal(upperRows, upperIdx, seg, ch, "created", m));
  }
  channelDetail[seg][ch] = { sent, delivered, click, created };
  });
 
  // ---- Cost by channel, Jan..Jul (Push always 0 - covered under MoEngage subscription) ----
  costByChannel[seg] = {
- WhatsApp: [1,2,3,4,5,6,7].map(m => costVal(costRows, seg, "WhatsApp", m)),
- Email: [1,2,3,4,5,6,7].map(m => costVal(costRows, seg, "Email", m)),
+ WhatsApp: [1,2,3,4,5,6,7].map(m => costVal(costRows, costIdx, seg, "WhatsApp", m)),
+ Email: [1,2,3,4,5,6,7].map(m => costVal(costRows, costIdx, seg, "Email", m)),
  Push: [0,0,0,0,0,0,0],
  };
 
  // ---- CPA Jun / Jul (Cost actual / Paid Out actual - ratio-invariant to forecast scaling) ----
- const poJunActual = lowerVal(lowerRows, seg, "paidOut", 6, "actual");
- const poJulActual = lowerVal(lowerRows, seg, "paidOut", 7, "actual");
- const costJunActual = costVal(costRows, seg, "Total", 6);
- const costJulActual = costVal(costRows, seg, "Total", 7);
+ const poJunActual = lowerVal(lowerRows, lowerIdx, seg, "paidOut", 6, "actual");
+ const poJulActual = lowerVal(lowerRows, lowerIdx, seg, "paidOut", 7, "actual");
+ const costJunActual = costVal(costRows, costIdx, seg, "Total", 6);
+ const costJulActual = costVal(costRows, costIdx, seg, "Total", 7);
  const cpaJun = costJunActual / poJunActual;
  const cpaJul = costJulActual / poJulActual;
  cpa[seg] = { jun: cpaJun, jul: cpaJul };
 
  // ---- Paid Out Amount vs Cost (Jun actual, Jul per JUL_MODE) ----
- const junAmt = lowerVal(lowerRows, seg, "paidOutAmount", 6, "actual");
+ const junAmt = lowerVal(lowerRows, lowerIdx, seg, "paidOutAmount", 6, "actual");
  const julAmt = JUL_MODE[seg] === "actual"
- ? lowerVal(lowerRows, seg, "paidOutAmount", 7, "actual")
- : lowerVal(lowerRows, seg, "paidOutAmount", 7, "forecast");
- const julCost = julCostDisplay(costRows, lowerRows, seg);
+ ? lowerVal(lowerRows, lowerIdx, seg, "paidOutAmount", 7, "actual")
+ : lowerVal(lowerRows, lowerIdx, seg, "paidOutAmount", 7, "forecast");
+ const julCost = julCostDisplay(costRows, costIdx, lowerRows, lowerIdx, seg);
  poAmountCost[seg] = { junAmt, junCost: costJunActual, julAmt, julCost };
 
  // ---- Budget Agustus: Target PO (Aug) x CPA Jun; downside x CPA Jul (LMT stays at CPA Jun, conservative) ----
- const targetPO = lowerVal(lowerRows, seg, "paidOut", 8, "target");
+ const targetPO = lowerVal(lowerRows, lowerIdx, seg, "paidOut", 8, "target");
  const budgetBase = targetPO * cpaJun;
  const budgetDownside = seg === "LMT" ? budgetBase : targetPO * cpaJul;
  budgetAug[seg] = { targetPO, budgetBase, budgetDownside };
@@ -604,8 +704,8 @@ function computeFromSheets(lowerRows, upperRows, costRows){
  channelEngage[seg] = {};
  ["WhatsApp","Email","Push"].forEach(ch => {
  channelEngage[seg][ch] = {
- sentJun: upperVal(upperRows, seg, ch, "sent", 6), deliveredJun: upperVal(upperRows, seg, ch, "delivered", 6), clickJun: upperVal(upperRows, seg, ch, "click", 6),
- sentJul: upperVal(upperRows, seg, ch, "sent", 7), deliveredJul: upperVal(upperRows, seg, ch, "delivered", 7), clickJul: upperVal(upperRows, seg, ch, "click", 7),
+ sentJun: upperVal(upperRows, upperIdx, seg, ch, "sent", 6), deliveredJun: upperVal(upperRows, upperIdx, seg, ch, "delivered", 6), clickJun: upperVal(upperRows, upperIdx, seg, ch, "click", 6),
+ sentJul: upperVal(upperRows, upperIdx, seg, ch, "sent", 7), deliveredJul: upperVal(upperRows, upperIdx, seg, ch, "delivered", 7), clickJul: upperVal(upperRows, upperIdx, seg, ch, "click", 7),
  };
  });
  });
@@ -617,7 +717,7 @@ function computeFromSheets(lowerRows, upperRows, costRows){
  const e = channelEngage[seg][ch];
  let cpcJun = 0, cpcJul = 0;
  if (ch !== "Push") {
- const cJun = costVal(costRows, seg, ch, 6), cJul = costVal(costRows, seg, ch, 7);
+ const cJun = costVal(costRows, costIdx, seg, ch, 6), cJul = costVal(costRows, costIdx, seg, ch, 7);
  cpcJun = e.clickJun ? cJun / e.clickJun : 0;
  cpcJul = e.clickJul ? cJul / e.clickJul : 0;
  }
@@ -643,7 +743,7 @@ function computeFromSheets(lowerRows, upperRows, costRows){
 
  // ---- Cost Agustus aktual (bulan ke-8) untuk alert pemakaian budget ----
  const augCost = {};
- SEGS.forEach(seg => { augCost[seg] = costVal(costRows, seg, "Total", 8) || 0; });
+ SEGS.forEach(seg => { augCost[seg] = costVal(costRows, costIdx, seg, "Total", 8) || 0; });
 
  // ---- Statistik WhatsApp (pooled conversion rate Created/Sent, 3 bulan terakhir - recency-weighted, referensi budget bulan terakhir) ----
  const waStats = {};
