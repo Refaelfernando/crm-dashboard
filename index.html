@@ -202,6 +202,15 @@
  <!-- KPI ROW -->
  <section class="kpi-row" id="kpiRow"></section>
 
+ <!-- FORECAST -->
+ <section class="row" style="grid-template-columns:1fr;">
+ <div class="card">
+ <h3 id="forecastTitle"> Forecast Akhir Bulan</h3>
+ <div class="cap" id="forecastCap">Regresi linear atas total harian s.d. tanggal terakhir yang ada datanya, diproyeksikan ke akhir bulan - mengikuti filter Segmen &amp; Channel (bukan filter Bulan)</div>
+ <div id="forecastBox"></div>
+ </div>
+ </section>
+
  <!-- TREND + BULAN COMPARISON -->
  <section class="row cols2">
  <div class="card">
@@ -340,6 +349,7 @@ const COST_SOURCE_SEG = { "New":"New", "Repeat":"Repeat+TopUp", "TopUp":"Repeat+
 
 // ===================== EMBEDDED DATA =====================
 const MONTHS = ["Jan","Feb","Mar","Apr","Mei","Jun","Jul"];
+const MONTHS_FULL = ["Jan","Feb","Mar","Apr","Mei","Jun","Jul","Ags","Sep","Okt","Nov","Des"]; // forecast can land on any month, not just Jan-Jul
 
 const TREND_FALLBACK = {
  "New": { created:[6959,5018,9044,12464,10101,9494,7847], afterFF:[6321,4620,8266,11816,9358,8805,7158], eligible:[171,166,222,376,339,307,226], accepted:[281,321,480,887,725,655,455], po:[177,177,240,460,351,344,232], julLabel:"forecast" },
@@ -482,6 +492,7 @@ let TREND = TREND_FALLBACK, COST = COST_FALLBACK, CPA = CPA_FALLBACK,
  CHANNEL_ENGAGE = CHANNEL_ENGAGE_FALLBACK, BUDGET_AUG = BUDGET_AUG_FALLBACK,
  CHANNEL_DETAIL = CHANNEL_DETAIL_FALLBACK, COST_BY_CHANNEL = COST_BY_CHANNEL_FALLBACK,
  AUG_COST = AUG_COST_FALLBACK, WA_STATS = WA_STATS_FALLBACK;
+let FORECAST_SOURCE = null; // only populated after a successful live fetch - needs real daily dates, which the offline fallback snapshot doesn't have
 
 // ===================== LIVE DATA LOADER (Google Sheet) =====================
 const SHEET_ID = "1gdUPT9xcT0xXKBBlFHUXhTIqDBAd1tdbk10VohmIo6c";
@@ -594,7 +605,7 @@ function costVal(costRows, costIdx, seg, type, month){
 // ---- LOWER FUNNEL: now a raw per-lead transaction log (previously a pivot/rekap table).
 // Columns: No | Created Date | Segment | Geo | Channel Attribute Logic | Created Apps |
 // After First Filter | Eligible | Accepted Apps | Paid Out | Paid Out Amount | Month
-const LOWER_LOG_COL = { segment:3, channel:5, created:6, afterFF:7, eligible:8, accepted:9, paidOut:10, paidOutAmount:11, month:12 };
+const LOWER_LOG_COL = { date:2, segment:3, channel:5, created:6, afterFF:7, eligible:8, accepted:9, paidOut:10, paidOutAmount:11, month:12 };
 const RAW_SEG_TO_DASH_SEG = { "New":"New", "Repeat":"Repeat", "TopUp":"TopUp", "LMT":"LMT", "SL":"SL" };
 const RAW_CH_TO_DASH_CH = { "WhatsApp":"WhatsApp", "Email":"Email", "Push Notification":"Push", "Sales AI":"SalesAI" };
 
@@ -602,6 +613,10 @@ function parseLowerFunnelLog(rows){
  const headerRow = findLabelRow(rows, "No", 0, rows.length);
  const dataStart = headerRow >= 0 ? headerRow + 1 : 0;
  const bySeg = {}, bySegCh = {};
+ // bySegChDate[seg][ch]["YYYY-MM-DD"] = {created,paidOut,paidOutAmount} - powers the forecast (needs
+ // real calendar dates, not just the Month column, to know how many days have actually elapsed).
+ const bySegChDate = {};
+ let maxDate = null; // freshest date found anywhere in the log - the "as of" reference point for forecasting
  const zeroStage = () => ({ created:0, afterFF:0, eligible:0, accepted:0, paidOut:0, paidOutAmount:0, rows:0 });
  const unrecognizedSeg = {};
  for (let i = dataStart; i < rows.length; i++) {
@@ -632,9 +647,68 @@ function parseLowerFunnelLog(rows){
  bySegCh[seg][ch][month].created += v.created;
  bySegCh[seg][ch][month].paidOut += v.paidOut;
  bySegCh[seg][ch][month].paidOutAmount += v.paidOutAmount;
+
+ const dateStr = cellText(rows, i, LOWER_LOG_COL.date); // expected "YYYY-MM-DD"
+ if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+ bySegChDate[seg] = bySegChDate[seg] || {};
+ bySegChDate[seg][ch] = bySegChDate[seg][ch] || {};
+ bySegChDate[seg][ch][dateStr] = bySegChDate[seg][ch][dateStr] || { created:0, paidOut:0, paidOutAmount:0 };
+ bySegChDate[seg][ch][dateStr].created += v.created;
+ bySegChDate[seg][ch][dateStr].paidOut += v.paidOut;
+ bySegChDate[seg][ch][dateStr].paidOutAmount += v.paidOutAmount;
+ if (!maxDate || dateStr > maxDate) maxDate = dateStr;
  }
  }
- return { bySeg, bySegCh, unrecognizedSeg, totalRowsRead: rows.length - dataStart };
+ }
+ return { bySeg, bySegCh, bySegChDate, maxDate, unrecognizedSeg, totalRowsRead: rows.length - dataStart };
+}
+
+// ---- FORECAST: linear regression on the current (in-progress) month's daily cumulative totals,
+// extrapolated to month-end. Chosen over a flat run-rate because it captures whether the pace is
+// accelerating/decelerating within the month, not just the average so far.
+function daysInMonth(year, month){ return new Date(year, month, 0).getDate(); }
+function linearForecastMonthEnd(dailySeries /* [{day, value}] for every elapsed day, 0-filled */, totalDays){
+ const n = dailySeries.length;
+ if (!n) return null;
+ let cum = 0;
+ const points = dailySeries.map(d => { cum += d.value; return { x: d.day, y: cum }; });
+ const lastActualCum = points[n-1].y;
+ if (n === 1) return Math.max(Math.round((points[0].y / points[0].x) * totalDays), lastActualCum);
+ const sumX = points.reduce((s,p)=>s+p.x,0), sumY = points.reduce((s,p)=>s+p.y,0);
+ const sumXY = points.reduce((s,p)=>s+p.x*p.y,0), sumX2 = points.reduce((s,p)=>s+p.x*p.x,0);
+ const denom = n*sumX2 - sumX*sumX;
+ if (denom === 0) return Math.max(Math.round((sumY/sumX)*totalDays), lastActualCum);
+ const b = (n*sumXY - sumX*sumY) / denom;
+ const a = (sumY - b*sumX) / n;
+ return Math.max(Math.round(a + b*totalDays), lastActualCum); // forecast never below what's already actual
+}
+// Builds the 0-filled daily series for the selected segments/channels, for the given metric, up to
+// (and including) elapsedDay of the given month/year.
+function buildDailySeries(bySegChDate, segArr, chArr, year, month, elapsedDay, metric){
+ const series = [];
+ for (let d = 1; d <= elapsedDay; d++) {
+ const dateStr = `${year}-${String(month).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+ let v = 0;
+ segArr.forEach(seg => chArr.forEach(ch => {
+ const rec = bySegChDate[seg] && bySegChDate[seg][ch] && bySegChDate[seg][ch][dateStr];
+ if (rec) v += rec[metric] || 0;
+ }));
+ series.push({ day: d, value: v });
+ }
+ return series;
+}
+function computeForecast(bySegChDate, maxDate, segArr, chArr){
+ if (!maxDate) return null;
+ const [y, m, d] = maxDate.split('-').map(Number);
+ const total = daysInMonth(y, m);
+ const metrics = ["created","paidOut","paidOutAmount"];
+ const out = { year:y, month:m, asOfDay:d, daysInMonth: total, monthLabel: MONTHS_FULL[m-1] || `Bulan ${m}` };
+ metrics.forEach(metric => {
+ const series = buildDailySeries(bySegChDate, segArr, chArr, y, m, d, metric);
+ const mtdActual = series.reduce((s,p)=>s+p.value,0);
+ out[metric] = { mtdActual, forecast: linearForecastMonthEnd(series, total) };
+ });
+ return out;
 }
 
 // ---- TARGET: raw log. Columns: No | Segmen | Channel | Month | Funnel | Target
@@ -709,7 +783,7 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  const SEGS = ALL_SEGMENTS;
  const upperIdx = buildUpperIndex(upperRows);
  const costIdx = buildCostIndex(costRows);
- const { bySeg: lowerAgg, bySegCh: lowerAggCh, unrecognizedSeg } = parseLowerFunnelLog(lowerRows);
+ const { bySeg: lowerAgg, bySegCh: lowerAggCh, bySegChDate, maxDate, unrecognizedSeg } = parseLowerFunnelLog(lowerRows);
  const targetAgg = parseTargetLog(targetRows);
 
  const trend = {}, cost = {}, cpa = {}, poAmountCost = {}, budgetAug = {};
@@ -839,6 +913,7 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  });
 
  return { trend, cost, cpa, poAmountCost, channel, channelEngage, budgetAug, channelDetail, costByChannel, augCost, waStats,
+ forecastSource: { bySegChDate, maxDate },
  debug: { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, upperIdx, costIdx } };
 }
 
@@ -912,6 +987,7 @@ async function loadLiveData(){
  CHANNEL_ENGAGE = computed.channelEngage; BUDGET_AUG = computed.budgetAug;
  CHANNEL_DETAIL = computed.channelDetail; COST_BY_CHANNEL = computed.costByChannel;
  AUG_COST = computed.augCost; WA_STATS = computed.waStats;
+ FORECAST_SOURCE = computed.forecastSource;
  LAST_DEBUG = computed.debug;
  renderDebugPanel();
  if (!calcInitializedWithLiveData) { renderPacingCalculator(getFilters()); calcInitializedWithLiveData = true; }
@@ -926,6 +1002,7 @@ async function loadLiveData(){
  CHANNEL_ENGAGE = CHANNEL_ENGAGE_FALLBACK; BUDGET_AUG = BUDGET_AUG_FALLBACK;
  CHANNEL_DETAIL = CHANNEL_DETAIL_FALLBACK; COST_BY_CHANNEL = COST_BY_CHANNEL_FALLBACK;
  AUG_COST = AUG_COST_FALLBACK; WA_STATS = WA_STATS_FALLBACK;
+ FORECAST_SOURCE = null;
  statusEl.innerHTML = `[CACHE] <b>Data cache</b> (snapshot 23 Jul 2026) - live fetch gagal. Pastikan Google Sheet sudah di-share 'Anyone with link can view'. <span style='color:var(--bad);'>(${err.message})</span>`;
  onFilterChange();
  } finally {
@@ -1015,6 +1092,36 @@ function restoreFilters(){
 }
 
 // ===================== KPI =====================
+// ===================== FORECAST =====================
+function renderForecast(f){
+ const box = document.getElementById("forecastBox");
+ const titleEl = document.getElementById("forecastTitle");
+ if (!FORECAST_SOURCE || !FORECAST_SOURCE.maxDate) {
+ titleEl.textContent = " Forecast Akhir Bulan";
+ box.innerHTML = `<p class='note'>Forecast butuh data live dengan tanggal harian (kolom Created Date) - belum tersedia (masih pakai data cache/fallback, atau live-fetch belum berhasil).</p>`;
+ return;
+ }
+ const fc = computeForecast(FORECAST_SOURCE.bySegChDate, FORECAST_SOURCE.maxDate, f.seg, f.ch);
+ if (!fc) { box.innerHTML = `<p class='note'>Tidak ada data untuk kombinasi filter ini.</p>`; return; }
+
+ titleEl.textContent = ` Forecast Akhir ${fc.monthLabel} (data s.d. tanggal ${fc.asOfDay})`;
+ document.getElementById("forecastCap").textContent =
+ `Regresi linear atas total harian ${fc.monthLabel} tanggal 1-${fc.asOfDay} (dari ${fc.asOfDay} titik data), diproyeksikan ke tanggal ${fc.daysInMonth}${segCapText(f.seg)}${chCapText(f.ch)}`;
+
+ const cards = [
+ { l: "Created - MTD Aktual", v: nf(fc.created.mtdActual), sub: `Forecast s.d. akhir bulan: <b>${nf(fc.created.forecast)}</b>` },
+ { l: "Paid Out - MTD Aktual", v: nf(fc.paidOut.mtdActual), sub: `Forecast s.d. akhir bulan: <b>${nf(fc.paidOut.forecast)}</b>` },
+ { l: "Paid Out Amount - MTD Aktual", v: rp(fc.paidOutAmount.mtdActual), sub: `Forecast s.d. akhir bulan: <b>${rp(fc.paidOutAmount.forecast)}</b>` },
+ ];
+ box.innerHTML = `<div class='row cols3' style='margin-bottom:0;'>${cards.map(c => `
+ <div class='kpi' style='border-left-color:${TEAL};'>
+ <div class='l'>${c.l}</div>
+ <div class='v'>${c.v}</div>
+ <div class='s neu' style='margin-top:6px;'>${c.sub}</div>
+ </div>`).join("")}</div>
+ <p class='note' style='margin-top:10px;'>Metode: regresi linear least-squares atas kurva kumulatif harian bulan berjalan (bukan cuma rata-rata run-rate) - menangkap kalau pace-nya lagi naik/turun, bukan diasumsikan rata terus. Kalau data harian baru sedikit (awal bulan), forecast masih kasar dan akan makin stabil seiring lebih banyak hari terlewati.</p>`;
+}
+
 function renderKPIs(f){
  const list = segs(f.seg);
  const m = f.month;
@@ -1849,6 +1956,7 @@ function recomputePacing(){
 function onFilterChange(){
  const f = getFilters();
  renderKPIs(f);
+ renderForecast(f);
  renderTrendChart(f);
  renderJunJulChart(f);
  renderFunnelRatioTable(f);
