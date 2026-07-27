@@ -841,6 +841,15 @@ function achievementVerdict(pctOfTarget){
  if (pctOfTarget >= 0.7) return { level:"warn", text:"di bawah target, perlu dikejar" };
  return { level:"bad", text:"jauh di bawah target" };
 }
+// Matches the known weekly pacing pattern already established in the Kalkulator Pacing Mingguan
+// section (Minggu 1 & 4 historically ramai, Minggu 2 & 3 historically lesu) - used to give
+// context on whether a dip is "expected seasonality" or a genuine new problem.
+function weekBandLabel(day){
+ if (day <= 7) return { label: "Minggu 1 (tgl 1-7)", type: "ramai" };
+ if (day <= 15) return { label: "Minggu 2 (tgl 8-15)", type: "lesu" };
+ if (day <= 24) return { label: "Minggu 3 (tgl 16-24)", type: "lesu" };
+ return { label: "Minggu 4 (tgl 25-31)", type: "ramai" };
+}
 
 function fetchViaAppsScript(sheetName){
  return new Promise((resolve, reject) => {
@@ -1347,59 +1356,125 @@ function renderCustomRange(f){
 
  const fmtDate = (s) => s.split('-').reverse().join('/');
  document.getElementById("customRangeTitle").textContent = ` Rentang Tanggal Custom: ${fmtDate(f.dateFrom)} - ${fmtDate(f.dateTo)} (${results.created.days} hari)`;
- document.getElementById("customRangeCap").textContent = `Total Created/Paid Out untuk rentang tanggal ini${segCapText(f.seg)}${chCapText(f.ch)}`;
+ document.getElementById("customRangeCap").textContent = `Total &amp; breakdown harian vs target harian${segCapText(f.seg)}${chCapText(f.ch)}`;
 
  if (!results.created.days) { box.innerHTML = `<p class='note'>Rentang tanggal tidak valid.</p>`; firEl.innerHTML = ""; return; }
 
+ // ---- Daily target = target bulanan / jumlah hari di bulan itu (rumus sesuai arahan) ----
+ const [rangeYear, rangeMonthNum] = f.dateFrom.split('-').map(Number);
+ const spansMultipleMonths = f.dateTo.slice(0,7) !== f.dateFrom.slice(0,7);
+ const totalDaysInMonth = daysInMonth(rangeYear, rangeMonthNum);
+ function sumTarget(metric){
+ let total = 0, any = false;
+ f.seg.forEach(seg => { const t = getTarget(seg, metric, rangeMonthNum); if (t != null) { total += t; any = true; } });
+ return any ? total : null;
+ }
+ const monthlyTargetCreated = sumTarget("created");
+ const dailyTargetCreated = monthlyTargetCreated != null ? monthlyTargetCreated / totalDaysInMonth : null;
+
+ // ---- Per-day breakdown ----
+ const days = dateRangeList(f.dateFrom, f.dateTo);
+ const dayRows = days.map(dateStr => {
+ const dayNum = Number(dateStr.slice(8,10));
+ const created = dailyValueForDate(bySegChDate, f.seg, f.ch, dateStr, "created");
+ const pctOfTarget = dailyTargetCreated ? created/dailyTargetCreated : null;
+ return { dateStr, dayNum, created, pctOfTarget, band: weekBandLabel(dayNum) };
+ });
+
  const cards = [
- { l: "Created", v: nf(results.created.total), sub: `Rata-rata ${(results.created.total/results.created.days).toFixed(1)}/hari` },
+ { l: "Created", v: nf(results.created.total), sub: `Rata-rata ${(results.created.total/results.created.days).toFixed(1)}/hari${dailyTargetCreated!=null?` (target harian: ${dailyTargetCreated.toFixed(1)})`:''}` },
  { l: "Paid Out", v: nf(results.paidOut.total), sub: `Rata-rata ${(results.paidOut.total/results.paidOut.days).toFixed(1)}/hari` },
  { l: "Paid Out Amount", v: rp(results.paidOutAmount.total), sub: `Rata-rata ${rp(results.paidOutAmount.total/results.paidOutAmount.days)}/hari` },
  ];
- box.innerHTML = `<div class='row cols3' style='margin-bottom:0;'>${cards.map(c => `
+ let html = `<div class='row cols3' style='margin-bottom:0;'>${cards.map(c => `
  <div class='kpi' style='border-left-color:${TEAL};'>
  <div class='l'>${c.l}</div>
  <div class='v'>${c.v}</div>
  <div class='s neu' style='margin-top:6px;'>${c.sub}</div>
  </div>`).join("")}</div>`;
 
- // FIR: z-score of this range's daily average vs the distribution of all other individual days -
- // answers "is this period unusually high/low, or just a typical stretch of days".
- const allDates = allDatesInData(bySegChDate, f.seg, f.ch);
- const inRangeDates = new Set(dateRangeList(f.dateFrom, f.dateTo));
- const outsideDailyCreated = allDates.filter(d => !inRangeDates.has(d)).map(d => dailyValueForDate(bySegChDate, f.seg, f.ch, d, "created"));
+ if (dailyTargetCreated != null) {
+ html += `<table class='dt' style='margin-top:14px;'><thead><tr><th>Tanggal</th><th>Minggu</th><th class='num'>Created</th><th class='num'>Target Harian</th><th class='num'>% Target</th><th>Status</th></tr></thead><tbody>${dayRows.map(d => {
+ let tag = "up", label = "Tercapai";
+ if (d.pctOfTarget < 0.7) { tag = "fix"; label = "Jauh di bawah target"; }
+ else if (d.pctOfTarget < 1) { tag = "hold"; label = "Kurang dari target"; }
+ return `<tr>
+ <td>${fmtDate(d.dateStr)}</td>
+ <td>${d.band.label}${d.band.type==='lesu'?' (historis lesu)':''}</td>
+ <td class='num'>${nf(d.created)}</td>
+ <td class='num'>${dailyTargetCreated.toFixed(1)}</td>
+ <td class='num'>${pct(d.pctOfTarget,0)}</td>
+ <td><span class='tag ${tag}'>${label}</span></td>
+ </tr>`;
+ }).join('')}</tbody></table>
+ <div class="note">Target harian = target Created bulan ${MONTHS_FULL[rangeMonthNum-1]} ÷ ${totalDaysInMonth} hari = ${dailyTargetCreated.toFixed(1)}/hari.${spansMultipleMonths?' Rentang ini melewati lebih dari 1 bulan - target harian dihitung pakai target bulan dari tanggal "Dari".':''}</div>`;
+ } else {
+ html += `<p class="note" style="margin-top:10px;">Belum ada target Created buat bulan ini di sheet Target - breakdown per-hari vs target belum bisa ditampilkan.</p>`;
+ }
+ box.innerHTML = html;
 
- if (outsideDailyCreated.length < 2) {
- firEl.innerHTML = firHtml(
- `Created total ${nf(results.created.total)}, Paid Out total ${nf(results.paidOut.total)}, Paid Out Amount ${rp(results.paidOutAmount.total)} selama ${results.created.days} hari.`,
- `Belum cukup hari pembanding di luar rentang ini untuk uji statistik.`,
- `Gunakan angka ini sebagai referensi mentah dulu.`
- );
- return;
- }
+ // ---- Statistical comparison: RESTRICTED to other days in the SAME MONTH only (not the whole
+ // dataset) - comparing against other months would dilute a genuine within-month dip, exactly the
+ // issue that made a bad week look "normal" before this fix. ----
+ const sameMonthPrefix = `${rangeYear}-${String(rangeMonthNum).padStart(2,'0')}`;
+ const allDatesSameMonth = allDatesInData(bySegChDate, f.seg, f.ch).filter(d => d.startsWith(sameMonthPrefix));
+ const inRangeSet = new Set(days);
+ const outsideDailyCreated = allDatesSameMonth.filter(d => !inRangeSet.has(d)).map(d => dailyValueForDate(bySegChDate, f.seg, f.ch, d, "created"));
+
  const avgInRange = results.created.total / results.created.days;
- const zObj = zScoreVsHistory(avgInRange, outsideDailyCreated);
- const findings = `Created total ${nf(results.created.total)} selama ${results.created.days} hari (rata-rata ${avgInRange.toFixed(1)}/hari). Paid Out total ${nf(results.paidOut.total)}, Paid Out Amount ${rp(results.paidOutAmount.total)}.`;
- let insight, recommendation;
- if (!zObj) {
- insight = `Belum cukup variasi data pembanding untuk uji statistik.`;
- recommendation = `Gunakan angka ini sebagai referensi mentah dulu.`;
- } else {
- const v = zVerdict(zObj.z);
- insight = `Rata-rata harian di rentang ini ${v.text} dibanding rata-rata hari-hari lain (z=${zObj.z.toFixed(2)}; rata-rata hari lain=${zObj.mean.toFixed(1)}/hari).`;
- const tier = zTier(zObj.z);
- if (tier === "strong" || tier === "significant") {
- recommendation = zObj.z > 0
- ? `Periode ini jauh di atas rata-rata - Action: identifikasi penyebabnya (campaign, momentum, hari kerja/weekend) dan replikasi di periode berikutnya.`
- : `Periode ini jauh di bawah rata-rata - Action: cek dulu apa ada gangguan (hari libur, sistem down, campaign berhenti) di rentang ini sebelum menyimpulkan performa turun.`;
- } else if (tier === "watch") {
- recommendation = zObj.z > 0
- ? `Ada indikasi periode ini di atas rata-rata (belum signifikan penuh) - Action: perpanjang pengamatan sebelum menyimpulkan ini tren beneran.`
- : `Ada indikasi periode ini di bawah rata-rata (belum signifikan penuh) - Action: waspada, pantau apa berlanjut di periode berikutnya.`;
- } else {
- recommendation = `Performa periode ini masih dalam rentang wajar - Action: tidak ada tindakan khusus yang diperlukan.`;
+ const belowTargetDays = dayRows.filter(d => d.pctOfTarget != null && d.pctOfTarget < 1);
+ const badDays = dayRows.filter(d => d.pctOfTarget != null && d.pctOfTarget < 0.7);
+ const lesuDaysInRange = dayRows.filter(d => d.band.type === "lesu").length;
+
+ const findings = `Created total ${nf(results.created.total)} selama ${results.created.days} hari (rata-rata ${avgInRange.toFixed(1)}/hari${dailyTargetCreated!=null?`, target harian ${dailyTargetCreated.toFixed(1)}`:''}). Paid Out total ${nf(results.paidOut.total)}, Paid Out Amount ${rp(results.paidOutAmount.total)}.` +
+ (dailyTargetCreated!=null ? ` ${belowTargetDays.length} dari ${dayRows.length} hari di bawah target harian (${badDays.length} di antaranya jauh di bawah, &lt;70%).` : '');
+
+ let zObj = null, tier = "stable";
+ if (outsideDailyCreated.length >= 2) {
+ zObj = zScoreVsHistory(avgInRange, outsideDailyCreated);
+ if (zObj) tier = zTier(zObj.z);
  }
+
+ const insightParts = [];
+ if (zObj) {
+ insightParts.push(`Rata-rata harian di rentang ini ${zVerdict(zObj.z).text} dibanding rata-rata hari LAIN DI BULAN YANG SAMA (z=${zObj.z.toFixed(2)}; rata-rata hari lain di bulan ini=${zObj.mean.toFixed(1)}/hari).`);
+ } else {
+ insightParts.push(`Belum cukup hari pembanding di bulan yang sama untuk uji statistik penuh.`);
  }
+ if (dailyTargetCreated != null) {
+ const avgPctTarget = avgInRange / dailyTargetCreated;
+ insightParts.push(`Rata-rata periode ini ${pct(avgPctTarget,0)} dari target harian.`);
+ }
+ if (lesuDaysInRange === dayRows.length && dayRows.length > 0) {
+ insightParts.push(`Seluruh rentang ini jatuh di periode yang secara historis emang lesu (${dayRows[0].band.label}${dayRows[dayRows.length-1].band.label!==dayRows[0].band.label?'-'+dayRows[dayRows.length-1].band.label:''}), sesuai pola di Kalkulator Pacing Mingguan.`);
+ } else if (lesuDaysInRange > 0) {
+ insightParts.push(`${lesuDaysInRange} dari ${dayRows.length} hari di rentang ini jatuh di periode yang historis lesu.`);
+ }
+ const insight = insightParts.join(' ');
+
+ // ---- Recommendation: senior CRM/data/business-analyst voice - specific, multi-point, and honest
+ // about what the data can and can't tell us (no daily Sent/Delivered data exists, only monthly). ----
+ const recSteps = [];
+ const isBad = tier === "strong" || tier === "significant" || (dailyTargetCreated!=null && badDays.length > 0);
+ const isWatch = !isBad && (tier === "watch" || (dailyTargetCreated!=null && belowTargetDays.length > 0));
+
+ if (isBad) {
+ recSteps.push(`<b>Alert:</b> periode ini bermasalah secara statistik dan/atau target - ${badDays.length ? `${badDays.length} hari jauh di bawah target harian` : `rata-rata harian ${zVerdict(zObj.z).text.toLowerCase()} dibanding hari lain bulan ini`}. Ini bukan sekadar variasi biasa.`);
+ if (lesuDaysInRange === dayRows.length) {
+ recSteps.push(`Meski bertepatan sama minggu yang historis lesu, gap-nya tetap perlu dikejar - pola musiman bukan alasan buat diamkan target meleset.`);
+ }
+ recSteps.push(`Cross-check volume Sent &amp; Delivery Rate bulan ${MONTHS_FULL[rangeMonthNum-1]} di section "Engagement per Channel" - kalau volume kirim ikut turun di periode ini (data cuma tersedia level bulanan, jadi ini pengecekan kasar), kemungkinan besar ini soal jadwal/volume pengiriman, bukan soal konten.`);
+ recSteps.push(`Kalau volume kirim normal tapi Created tetap rendah, kemungkinan soal kualitas targeting/konten - segarkan creative atau tawaran buat segmen ini, atau audit apakah ada jeda/gap di jadwal campaign selama periode ini.`);
+ recSteps.push(`Manfaatkan pola "Minggu 1 &amp; 4 ramai" - naikkan alokasi kirim di minggu berikutnya (buka Kalkulator Pacing Mingguan di bawah) buat nutup gap bulan ini, bukan cuma nunggu bulan depan.`);
+ recSteps.push(`Kalau ini berlanjut &gt;1 minggu, eskalasi ke tim campaign/CRM ops buat audit end-to-end (kualitas data lead, delivery provider, approval konten).`);
+ } else if (isWatch) {
+ recSteps.push(`<b>Waspada:</b> performa periode ini mulai di bawah target/rata-rata tapi belum ekstrem.`);
+ recSteps.push(`Pantau 2-3 hari lagi - kalau berlanjut turun, ikuti langkah di atas (cross-check volume kirim, refresh konten). Kalau cuma dip sesaat, biasanya nggak perlu tindakan besar.`);
+ } else {
+ recSteps.push(`Performa periode ini sehat - di dalam rentang wajar dan/atau memenuhi target harian. Tidak ada tindakan mendesak, pertahankan ritme saat ini.`);
+ }
+ const recommendation = recSteps.join(' ');
+
  firEl.innerHTML = firHtml(findings, insight, recommendation);
 }
 
@@ -1557,30 +1632,10 @@ function renderKPIFIR(f){
  const created = sumDateRange(bySegChDate, list, f.ch, f.dateFrom, f.dateTo, "created");
  const paidOut = sumDateRange(bySegChDate, list, f.ch, f.dateFrom, f.dateTo, "paidOut");
  if (!created.days) { el.innerHTML = firHtml("Rentang tanggal tidak valid.","-","-"); return; }
- const allDates = allDatesInData(bySegChDate, list, f.ch);
- const inRangeDates = new Set(dateRangeList(f.dateFrom, f.dateTo));
- const outsideDailyCreated = allDates.filter(d => !inRangeDates.has(d)).map(d => dailyValueForDate(bySegChDate, list, f.ch, d, "created"));
  const findings = `Created total ${nf(created.total)}, Paid Out total ${nf(paidOut.total)} selama ${created.days} hari (${f.dateFrom.split('-').reverse().join('/')} - ${f.dateTo.split('-').reverse().join('/')}).`;
- if (outsideDailyCreated.length < 2) { el.innerHTML = firHtml(findings, "Belum cukup hari pembanding di luar rentang ini untuk uji statistik.", "Gunakan angka ini sebagai referensi mentah dulu."); return; }
- const avgInRange = created.total / created.days;
- const zObj = zScoreVsHistory(avgInRange, outsideDailyCreated);
- if (!zObj) { el.innerHTML = firHtml(findings, "Belum cukup variasi data pembanding.", "Gunakan angka ini sebagai referensi mentah dulu."); return; }
- const v = zVerdict(zObj.z);
- const insight = `Rata-rata harian Created di rentang ini ${v.text} dibanding rata-rata hari-hari lain (z=${zObj.z.toFixed(2)}; rata-rata hari lain=${zObj.mean.toFixed(1)}/hari).`;
- const tier = zTier(zObj.z);
- let recommendation;
- if (tier === "strong" || tier === "significant") {
- recommendation = zObj.z > 0
- ? `Periode ini jauh di atas rata-rata - Action: identifikasi penyebabnya (campaign/momentum apa yang jalan di tanggal ini) dan replikasi di periode berikutnya.`
- : `Periode ini jauh di bawah rata-rata - Action: cek dulu apa ada gangguan (hari libur, sistem down, campaign berhenti) di rentang ini sebelum ambil kesimpulan performa turun.`;
- } else if (tier === "watch") {
- recommendation = zObj.z > 0
- ? `Ada indikasi periode ini di atas rata-rata (belum signifikan penuh) - Action: perpanjang pengamatan beberapa hari lagi sebelum menyimpulkan ini tren beneran.`
- : `Ada indikasi periode ini di bawah rata-rata (belum signifikan penuh) - Action: waspada, tapi belum perlu tindakan besar - pantau apa berlanjut di hari-hari berikutnya.`;
- } else {
- recommendation = `Performa periode ini masih dalam rentang wajar dibanding hari-hari lain - Action: tidak perlu tindakan khusus.`;
- }
- el.innerHTML = firHtml(findings, insight, recommendation);
+ el.innerHTML = firHtml(findings,
+ `Analisis harian lengkap (perbandingan vs rata-rata bulan yang sama, vs target harian, dan breakdown per-tanggal) ada di section "Rentang Tanggal Custom" di bawah.`,
+ `Scroll ke section "Rentang Tanggal Custom" untuk lihat tabel per-hari dan rekomendasi detail.`);
  return;
  }
 
