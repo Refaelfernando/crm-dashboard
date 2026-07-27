@@ -1363,6 +1363,38 @@ function renderKPIs(f){
  const allChSelected = chSelArr.length >= ALL_CHANNELS.length;
  const chLabel = allChSelected ? "" : ` (${chSelArr.map(c=>CH_DISPLAY[c]||c).join(', ')})`;
 
+ // ---- Custom date range active: Created/Paid Out/Paid Out Amount come straight from the daily
+ // log (real granularity), but Cost/CPA stay at month level since Cost Detail has no daily
+ // breakdown - shown as "-" rather than silently mixing a partial-range number against a
+ // full-month cost, which would misrepresent CPA.
+ if (f.dateFrom && f.dateTo) {
+ if (!FORECAST_SOURCE || !FORECAST_SOURCE.bySegChDate) {
+ document.getElementById("kpiRow").innerHTML = `<div class='kpi'><div class='l'>Rentang Tanggal Custom</div><div class='s neg'>Butuh data live (bukan cache) untuk memakai rentang tanggal.</div></div>`;
+ return;
+ }
+ if (f.dateFrom > f.dateTo) {
+ document.getElementById("kpiRow").innerHTML = `<div class='kpi'><div class='l'>Rentang Tanggal Custom</div><div class='s neg'>Tanggal "Dari" harus sebelum "Sampai".</div></div>`;
+ return;
+ }
+ const { bySegChDate } = FORECAST_SOURCE;
+ const created = sumDateRange(bySegChDate, list, chSelArr, f.dateFrom, f.dateTo, "created");
+ const paidOut = sumDateRange(bySegChDate, list, chSelArr, f.dateFrom, f.dateTo, "paidOut");
+ const rangeLabel = `${f.dateFrom.split('-').reverse().join('/')} - ${f.dateTo.split('-').reverse().join('/')}`;
+ const cards = [
+ { l:`Created - ${rangeLabel}${chLabel}`, v: created.days ? nf(created.total) : "-", s: created.days ? `${created.days} hari, rata-rata ${(created.total/created.days).toFixed(1)}/hari` : "Rentang tidak valid", cls:"neu" },
+ { l:`Paid Out - ${rangeLabel}${chLabel}`, v: paidOut.days ? nf(paidOut.total) : "-", s: paidOut.days ? `${paidOut.days} hari, rata-rata ${(paidOut.total/paidOut.days).toFixed(1)}/hari` : "Rentang tidak valid", cls:"neu" },
+ { l:`CPA - ${rangeLabel}`, v: "-", s: "Cost Detail tidak granular harian, cuma tersedia per bulan - tidak bisa dipecah ke rentang tanggal custom", cls:"neu" },
+ { l:`Total Cost - ${rangeLabel}`, v: "-", s: "Cost Detail tidak granular harian - lihat KPI level bulan (hapus rentang tanggal) untuk angka Cost", cls:"neu" },
+ ];
+ document.getElementById("kpiRow").innerHTML = cards.map(c => `
+ <div class='kpi'>
+ <div class='l'>${c.l}</div>
+ <div class='v'>${c.v}</div>
+ ${c.s ? `<div class='s ${c.cls||''}'>${c.s}</div>` : ''}
+ </div>`).join("");
+ return;
+ }
+
  function createdFor(seg, monthIdx){
  if (allChSelected) return TREND[seg].created[monthIdx];
  let total = 0, any = false;
@@ -1471,6 +1503,30 @@ function renderKPIFIR(f){
  const el = document.getElementById("kpiFIR");
  if (!el) return;
  const list = segs(f.seg);
+
+ if (f.dateFrom && f.dateTo) {
+ if (!FORECAST_SOURCE || !FORECAST_SOURCE.bySegChDate || f.dateFrom > f.dateTo) { el.innerHTML = ""; return; }
+ const { bySegChDate } = FORECAST_SOURCE;
+ const created = sumDateRange(bySegChDate, list, f.ch, f.dateFrom, f.dateTo, "created");
+ const paidOut = sumDateRange(bySegChDate, list, f.ch, f.dateFrom, f.dateTo, "paidOut");
+ if (!created.days) { el.innerHTML = firHtml("Rentang tanggal tidak valid.","-","-"); return; }
+ const allDates = allDatesInData(bySegChDate, list, f.ch);
+ const inRangeDates = new Set(dateRangeList(f.dateFrom, f.dateTo));
+ const outsideDailyCreated = allDates.filter(d => !inRangeDates.has(d)).map(d => dailyValueForDate(bySegChDate, list, f.ch, d, "created"));
+ const findings = `Created total ${nf(created.total)}, Paid Out total ${nf(paidOut.total)} selama ${created.days} hari (${f.dateFrom.split('-').reverse().join('/')} - ${f.dateTo.split('-').reverse().join('/')}).`;
+ if (outsideDailyCreated.length < 2) { el.innerHTML = firHtml(findings, "Belum cukup hari pembanding di luar rentang ini untuk uji statistik.", "Gunakan angka ini sebagai referensi mentah dulu."); return; }
+ const avgInRange = created.total / created.days;
+ const zObj = zScoreVsHistory(avgInRange, outsideDailyCreated);
+ if (!zObj) { el.innerHTML = firHtml(findings, "Belum cukup variasi data pembanding.", "Gunakan angka ini sebagai referensi mentah dulu."); return; }
+ const v = zVerdict(zObj.z);
+ const insight = `Rata-rata harian Created di rentang ini ${v.text} dibanding rata-rata hari-hari lain (z=${zObj.z.toFixed(2)}; rata-rata hari lain=${zObj.mean.toFixed(1)}/hari).`;
+ const recommendation = Math.abs(zObj.z) >= 1.96
+ ? (zObj.z > 0 ? `Periode ini jauh di atas rata-rata - identifikasi penyebabnya buat direplikasi.` : `Periode ini jauh di bawah rata-rata - cek apa ada gangguan di rentang tanggal ini.`)
+ : `Performa periode ini masih dalam rentang wajar dibanding hari-hari lain.`;
+ el.innerHTML = firHtml(findings, insight, recommendation);
+ return;
+ }
+
  const allChSelected = f.ch.length >= ALL_CHANNELS.length;
  const monthArr = (getterFn) => [0,1,2,3,4,5,6].map(getterFn);
  const createdAt = (mi) => {
