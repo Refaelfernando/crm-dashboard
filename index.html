@@ -195,6 +195,15 @@
  <option value="6" selected>Juli</option>
  </select>
  </div>
+ <div>
+ <label>Rentang Tanggal Custom (opsional)</label>
+ <div style="display:flex;gap:6px;align-items:center;">
+ <input type="date" id="dateFrom" onchange="onDateRangeChange()" style="padding:5px 6px;border-radius:6px;border:1px solid rgba(255,255,255,.3);background:rgba(255,255,255,.12);color:#fff;font-size:12px;">
+ <span style="color:#CFEAF2;font-size:11px;">s.d.</span>
+ <input type="date" id="dateTo" onchange="onDateRangeChange()" style="padding:5px 6px;border-radius:6px;border:1px solid rgba(255,255,255,.3);background:rgba(255,255,255,.12);color:#fff;font-size:12px;">
+ <button type="button" onclick="clearDateRange()" style="padding:5px 8px;border-radius:6px;border:1px solid rgba(255,255,255,.3);background:transparent;color:#fff;font-size:11px;cursor:pointer;" title="Hapus rentang tanggal">✕</button>
+ </div>
+ </div>
  </div>
  </header>
 
@@ -217,6 +226,16 @@
  <div class="cap" id="forecastCap">Regresi linear atas total harian s.d. tanggal terakhir yang ada datanya, diproyeksikan ke akhir bulan - mengikuti filter Segmen &amp; Channel (bukan filter Bulan)</div>
  <div id="forecastBox"></div>
  <div id="forecastFIR"></div>
+ </div>
+ </section>
+
+ <!-- CUSTOM DATE RANGE -->
+ <section class="row" id="customRangeSection" style="grid-template-columns:1fr;display:none;">
+ <div class="card">
+ <h3 id="customRangeTitle"> Rentang Tanggal Custom</h3>
+ <div class="cap" id="customRangeCap">Total Created/Paid Out untuk rentang tanggal yang dipilih di atas, mengikuti filter Segmen &amp; Channel</div>
+ <div id="customRangeBox"></div>
+ <div id="customRangeFIR"></div>
  </div>
  </section>
 
@@ -728,6 +747,37 @@ function computeForecast(bySegChDate, maxDate, segArr, chArr){
  return out;
 }
 
+// ---- CUSTOM DATE RANGE helpers ----
+function dailyValueForDate(bySegChDate, segArr, chArr, dateStr, metric){
+ let v = 0;
+ segArr.forEach(seg => chArr.forEach(ch => {
+ const rec = bySegChDate[seg] && bySegChDate[seg][ch] && bySegChDate[seg][ch][dateStr];
+ if (rec) v += rec[metric] || 0;
+ }));
+ return v;
+}
+function dateRangeList(dateFrom, dateTo){
+ const list = [];
+ let d = new Date(dateFrom + "T00:00:00");
+ const to = new Date(dateTo + "T00:00:00");
+ while (d <= to) { list.push(d.toISOString().slice(0,10)); d.setDate(d.getDate()+1); }
+ return list;
+}
+function sumDateRange(bySegChDate, segArr, chArr, dateFrom, dateTo, metric){
+ const dates = dateRangeList(dateFrom, dateTo);
+ let total = 0;
+ dates.forEach(dateStr => { total += dailyValueForDate(bySegChDate, segArr, chArr, dateStr, metric); });
+ return { total, days: dates.length };
+}
+function allDatesInData(bySegChDate, segArr, chArr){
+ const set = new Set();
+ segArr.forEach(seg => chArr.forEach(ch => {
+ const chData = bySegChDate[seg] && bySegChDate[seg][ch];
+ if (chData) Object.keys(chData).forEach(d => set.add(d));
+ }));
+ return Array.from(set).sort();
+}
+
 // ---- TARGET: raw log. Columns: No | Segmen | Channel | Month | Funnel | Target
 const TARGET_LOG_COL = { segment:2, month:4, funnel:5, target:6 };
 const TARGET_MONTH_TO_NUM = { "Jan 26":1,"Feb 26":2,"Mar 26":3,"Apr 26":4,"May 26":5,"Jun 26":6,"Jul 26":7,"Aug 26":8,"Sep 26":9,"Oct 26":10,"Nov 26":11,"Dec 26":12 };
@@ -1105,13 +1155,23 @@ function getFilters(){
  const monthVal = document.getElementById("monthFilter").value;
  const segSel = checkedValues("segFilterPanel");
  const chSel = checkedValues("chFilterPanel");
+ const dateFrom = document.getElementById("dateFrom").value; // "" or "YYYY-MM-DD"
+ const dateTo = document.getElementById("dateTo").value;
  return {
  seg: segSel.length ? segSel : ALL_SEGMENTS.slice(),
  ch: chSel.length ? chSel : ALL_CHANNELS.slice(),
  month: monthVal === "all" ? "all" : parseInt(monthVal, 10),
+ dateFrom: dateFrom || null,
+ dateTo: dateTo || null,
  };
 }
 function monthLabel(m){ return m === "all" ? "Semua Bulan (Jan-Jul)" : MONTHS[m]; }
+function onDateRangeChange(){ saveFilters(); onFilterChange(); }
+function clearDateRange(){
+ document.getElementById("dateFrom").value = "";
+ document.getElementById("dateTo").value = "";
+ onDateRangeChange();
+}
 
 function toggleDropdown(wrapId){
  const panel = document.getElementById(wrapId === "segFilterWrap" ? "segFilterPanel" : "chFilterPanel");
@@ -1144,6 +1204,8 @@ function saveFilters(){
  seg: checkedValues("segFilterPanel"),
  ch: checkedValues("chFilterPanel"),
  month: document.getElementById("monthFilter").value,
+ dateFrom: document.getElementById("dateFrom").value,
+ dateTo: document.getElementById("dateTo").value,
  }));
  } catch (e) { /* localStorage tidak tersedia, abaikan */ }
 }
@@ -1159,6 +1221,8 @@ function restoreFilters(){
  document.querySelectorAll("#chFilterPanel input[type=checkbox]").forEach(el => { el.checked = f.ch.includes(el.value); });
  }
  if (f.month) document.getElementById("monthFilter").value = f.month;
+ if (f.dateFrom) document.getElementById("dateFrom").value = f.dateFrom;
+ if (f.dateTo) document.getElementById("dateTo").value = f.dateTo;
  updateDropdownLabel("segFilterWrap", "segFilterPanel", ALL_SEGMENTS, "Semua Segmen");
  updateDropdownLabel("chFilterWrap", "chFilterPanel", ALL_CHANNELS, "Semua Channel");
  } catch (e) { /* abaikan kalau data tersimpan rusak/tidak valid */ }
@@ -1210,6 +1274,79 @@ function renderForecast(f){
  ? `Jangan langsung ambil keputusan besar (alokasi budget, target) dari angka forecast ini - tunggu beberapa hari lagi biar polanya lebih jelas, atau cross-check manual ke tim lapangan.`
  : `Forecast ini cukup dipakai sebagai sinyal awal buat pacing bulan ini - tetap pantau lagi mendekati akhir bulan buat konfirmasi.`
  );
+}
+
+// ===================== CUSTOM DATE RANGE =====================
+function renderCustomRange(f){
+ const section = document.getElementById("customRangeSection");
+ if (!f.dateFrom || !f.dateTo) { section.style.display = "none"; return; }
+ section.style.display = "";
+ const box = document.getElementById("customRangeBox");
+ const firEl = document.getElementById("customRangeFIR");
+ if (!FORECAST_SOURCE || !FORECAST_SOURCE.bySegChDate) {
+ box.innerHTML = `<p class='note'>Rentang tanggal custom butuh data live dengan tanggal harian - belum tersedia (masih cache/fallback, atau live-fetch belum berhasil).</p>`;
+ firEl.innerHTML = "";
+ return;
+ }
+ if (f.dateFrom > f.dateTo) {
+ box.innerHTML = `<p class='note' style='color:var(--bad);'>Tanggal "Dari" harus sebelum atau sama dengan tanggal "Sampai".</p>`;
+ firEl.innerHTML = "";
+ return;
+ }
+ const { bySegChDate } = FORECAST_SOURCE;
+ const metrics = ["created","paidOut","paidOutAmount"];
+ const results = {};
+ metrics.forEach(m => { results[m] = sumDateRange(bySegChDate, f.seg, f.ch, f.dateFrom, f.dateTo, m); });
+
+ const fmtDate = (s) => s.split('-').reverse().join('/');
+ document.getElementById("customRangeTitle").textContent = ` Rentang Tanggal Custom: ${fmtDate(f.dateFrom)} - ${fmtDate(f.dateTo)} (${results.created.days} hari)`;
+ document.getElementById("customRangeCap").textContent = `Total Created/Paid Out untuk rentang tanggal ini${segCapText(f.seg)}${chCapText(f.ch)}`;
+
+ if (!results.created.days) { box.innerHTML = `<p class='note'>Rentang tanggal tidak valid.</p>`; firEl.innerHTML = ""; return; }
+
+ const cards = [
+ { l: "Created", v: nf(results.created.total), sub: `Rata-rata ${(results.created.total/results.created.days).toFixed(1)}/hari` },
+ { l: "Paid Out", v: nf(results.paidOut.total), sub: `Rata-rata ${(results.paidOut.total/results.paidOut.days).toFixed(1)}/hari` },
+ { l: "Paid Out Amount", v: rp(results.paidOutAmount.total), sub: `Rata-rata ${rp(results.paidOutAmount.total/results.paidOutAmount.days)}/hari` },
+ ];
+ box.innerHTML = `<div class='row cols3' style='margin-bottom:0;'>${cards.map(c => `
+ <div class='kpi' style='border-left-color:${TEAL};'>
+ <div class='l'>${c.l}</div>
+ <div class='v'>${c.v}</div>
+ <div class='s neu' style='margin-top:6px;'>${c.sub}</div>
+ </div>`).join("")}</div>`;
+
+ // FIR: z-score of this range's daily average vs the distribution of all other individual days -
+ // answers "is this period unusually high/low, or just a typical stretch of days".
+ const allDates = allDatesInData(bySegChDate, f.seg, f.ch);
+ const inRangeDates = new Set(dateRangeList(f.dateFrom, f.dateTo));
+ const outsideDailyCreated = allDates.filter(d => !inRangeDates.has(d)).map(d => dailyValueForDate(bySegChDate, f.seg, f.ch, d, "created"));
+
+ if (outsideDailyCreated.length < 2) {
+ firEl.innerHTML = firHtml(
+ `Created total ${nf(results.created.total)}, Paid Out total ${nf(results.paidOut.total)}, Paid Out Amount ${rp(results.paidOutAmount.total)} selama ${results.created.days} hari.`,
+ `Belum cukup hari pembanding di luar rentang ini untuk uji statistik.`,
+ `Gunakan angka ini sebagai referensi mentah dulu.`
+ );
+ return;
+ }
+ const avgInRange = results.created.total / results.created.days;
+ const zObj = zScoreVsHistory(avgInRange, outsideDailyCreated);
+ const findings = `Created total ${nf(results.created.total)} selama ${results.created.days} hari (rata-rata ${avgInRange.toFixed(1)}/hari). Paid Out total ${nf(results.paidOut.total)}, Paid Out Amount ${rp(results.paidOutAmount.total)}.`;
+ let insight, recommendation;
+ if (!zObj) {
+ insight = `Belum cukup variasi data pembanding untuk uji statistik.`;
+ recommendation = `Gunakan angka ini sebagai referensi mentah dulu.`;
+ } else {
+ const v = zVerdict(zObj.z);
+ insight = `Rata-rata harian di rentang ini ${v.text} dibanding rata-rata hari-hari lain (z=${zObj.z.toFixed(2)}; rata-rata hari lain=${zObj.mean.toFixed(1)}/hari).`;
+ recommendation = Math.abs(zObj.z) >= 1.96
+ ? (zObj.z > 0
+ ? `Periode ini jauh di atas rata-rata - identifikasi apa penyebabnya (campaign, momentum, dll) buat direplikasi di periode lain.`
+ : `Periode ini jauh di bawah rata-rata - cek apa ada gangguan (hari libur, sistem down, campaign berhenti) di rentang tanggal ini.`)
+ : `Performa periode ini masih dalam rentang wajar dibanding hari-hari lain - tidak ada anomali yang perlu digali.`;
+ }
+ firEl.innerHTML = firHtml(findings, insight, recommendation);
 }
 
 function renderKPIs(f){
@@ -2268,6 +2405,7 @@ function onFilterChange(){
  renderKPIs(f);
  renderKPIFIR(f);
  renderForecast(f);
+ renderCustomRange(f);
  renderTrendChart(f);
  renderJunJulChart(f);
  renderFunnelRatioTable(f);
