@@ -26,16 +26,20 @@
  header.dh img{width:38px;height:38px;background:#fff;border-radius:8px;padding:4px;}
  header.dh h1{font-size:19px;font-weight:700;margin:0;}
  header.dh .sub{font-size:12px;color:#CFEAF2;margin-top:2px;}
- .filters{display:flex;gap:10px;align-items:center;flex-wrap:wrap;}
- .filters label{font-size:11px;color:#CFEAF2;margin-right:4px;}
- .filters select{
- padding:6px 10px;border-radius:6px;border:1px solid rgba(255,255,255,.3);
+ .filters{display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap;}
+ .filter-group{display:flex;flex-direction:column;gap:5px;}
+ .filter-group label{font-size:11px;color:#CFEAF2;white-space:nowrap;}
+ .filters select, .filters input[type="date"]{
+ height:32px;box-sizing:border-box;padding:0 10px;border-radius:6px;border:1px solid rgba(255,255,255,.3);
  background:rgba(255,255,255,.12);color:#fff;font-size:12.5px;
  }
  .filters select option{background:var(--blue-dark);color:#fff;}
+ .filters input[type="date"]{color-scheme:dark;}
+ .date-range-row{display:flex;gap:6px;align-items:center;}
+ .date-range-row span{color:#CFEAF2;font-size:11px;}
+ .date-range-clear{height:32px;width:32px;box-sizing:border-box;border-radius:6px;border:1px solid rgba(255,255,255,.3);background:transparent;color:#fff;font-size:12px;cursor:pointer;flex-shrink:0;}
  .msdrop{position:relative;}
- .msdrop label{display:block;font-size:11px;color:#CFEAF2;margin-bottom:0;}
- .msdrop-btn{padding:6px 10px;border-radius:6px;border:1px solid rgba(255,255,255,.3);background:rgba(255,255,255,.12);color:#fff;font-size:12.5px;cursor:pointer;min-width:140px;text-align:left;}
+ .msdrop-btn{height:32px;box-sizing:border-box;padding:0 10px;border-radius:6px;border:1px solid rgba(255,255,255,.3);background:rgba(255,255,255,.12);color:#fff;font-size:12.5px;cursor:pointer;min-width:130px;text-align:left;}
  .msdrop-panel{display:none;position:absolute;top:100%;left:0;margin-top:4px;background:#fff;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.18);padding:8px 12px;z-index:50;min-width:170px;}
  .msdrop-panel.open{display:block;}
  .msdrop-panel label{display:flex;align-items:center;gap:6px;color:var(--text);font-size:12.5px;padding:4px 2px;margin-bottom:0;cursor:pointer;}
@@ -161,7 +165,7 @@
  </div>
  </div>
  <div class="filters">
- <div class="msdrop" id="segFilterWrap">
+ <div class="msdrop filter-group" id="segFilterWrap">
  <label>Segmen</label>
  <button type="button" class="msdrop-btn" onclick="toggleDropdown('segFilterWrap')">Semua Segmen ▾</button>
  <div class="msdrop-panel" id="segFilterPanel">
@@ -172,7 +176,7 @@
  <label><input type="checkbox" value="SL" checked onchange="onMultiFilterChange()"> SL</label>
  </div>
  </div>
- <div class="msdrop" id="chFilterWrap">
+ <div class="msdrop filter-group" id="chFilterWrap">
  <label>Channel</label>
  <button type="button" class="msdrop-btn" onclick="toggleDropdown('chFilterWrap')">Semua Channel ▾</button>
  <div class="msdrop-panel" id="chFilterPanel">
@@ -182,7 +186,7 @@
  <label><input type="checkbox" value="SalesAI" checked onchange="onMultiFilterChange()"> Sales AI</label>
  </div>
  </div>
- <div>
+ <div class="filter-group">
  <label>Bulan</label>
  <select id="monthFilter" onchange="saveFilters(); loadLiveData()">
  <option value="all">Semua Bulan</option>
@@ -195,13 +199,13 @@
  <option value="6" selected>Juli</option>
  </select>
  </div>
- <div>
+ <div class="filter-group">
  <label>Rentang Tanggal Custom (opsional)</label>
- <div style="display:flex;gap:6px;align-items:center;">
- <input type="date" id="dateFrom" onchange="onDateRangeChange()" style="padding:5px 6px;border-radius:6px;border:1px solid rgba(255,255,255,.3);background:rgba(255,255,255,.12);color:#fff;font-size:12px;">
- <span style="color:#CFEAF2;font-size:11px;">s.d.</span>
- <input type="date" id="dateTo" onchange="onDateRangeChange()" style="padding:5px 6px;border-radius:6px;border:1px solid rgba(255,255,255,.3);background:rgba(255,255,255,.12);color:#fff;font-size:12px;">
- <button type="button" onclick="clearDateRange()" style="padding:5px 8px;border-radius:6px;border:1px solid rgba(255,255,255,.3);background:transparent;color:#fff;font-size:11px;cursor:pointer;" title="Hapus rentang tanggal">✕</button>
+ <div class="date-range-row">
+ <input type="date" id="dateFrom" onchange="onDateRangeChange()">
+ <span>s.d.</span>
+ <input type="date" id="dateTo" onchange="onDateRangeChange()">
+ <button type="button" class="date-range-clear" onclick="clearDateRange()" title="Hapus rentang tanggal">✕</button>
  </div>
  </div>
  </div>
