@@ -33,6 +33,13 @@
  background:rgba(255,255,255,.12);color:#fff;font-size:12.5px;
  }
  .filters select option{background:var(--blue-dark);color:#fff;}
+ .msdrop{position:relative;}
+ .msdrop label{display:block;font-size:11px;color:#CFEAF2;margin-bottom:0;}
+ .msdrop-btn{padding:6px 10px;border-radius:6px;border:1px solid rgba(255,255,255,.3);background:rgba(255,255,255,.12);color:#fff;font-size:12.5px;cursor:pointer;min-width:140px;text-align:left;}
+ .msdrop-panel{display:none;position:absolute;top:100%;left:0;margin-top:4px;background:#fff;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.18);padding:8px 12px;z-index:50;min-width:170px;}
+ .msdrop-panel.open{display:block;}
+ .msdrop-panel label{display:flex;align-items:center;gap:6px;color:var(--text);font-size:12.5px;padding:4px 2px;margin-bottom:0;cursor:pointer;}
+ .msdrop-panel input{cursor:pointer;}
 
  .kpi-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:var(--gap);margin-bottom:var(--gap);}
  .kpi{background:var(--card);border-radius:var(--radius);padding:14px 18px;box-shadow:0 1px 3px rgba(0,0,0,.06);border-left:3px solid var(--blue);}
@@ -147,23 +154,26 @@
  </div>
  </div>
  <div class="filters">
- <div>
+ <div class="msdrop" id="segFilterWrap">
  <label>Segmen</label>
- <select id="segFilter" onchange="saveFilters(); loadLiveData()">
- <option value="all">Semua Segmen</option>
- <option value="New">New</option>
- <option value="Repeat+TopUp">Repeat+TopUp</option>
- <option value="LMT">LMT</option>
- </select>
+ <button type="button" class="msdrop-btn" onclick="toggleDropdown('segFilterWrap')">Semua Segmen ▾</button>
+ <div class="msdrop-panel" id="segFilterPanel">
+ <label><input type="checkbox" value="New" checked onchange="onMultiFilterChange()"> New</label>
+ <label><input type="checkbox" value="Repeat" checked onchange="onMultiFilterChange()"> Repeat</label>
+ <label><input type="checkbox" value="TopUp" checked onchange="onMultiFilterChange()"> TopUp</label>
+ <label><input type="checkbox" value="LMT" checked onchange="onMultiFilterChange()"> LMT</label>
+ <label><input type="checkbox" value="SL" checked onchange="onMultiFilterChange()"> SL</label>
  </div>
- <div>
+ </div>
+ <div class="msdrop" id="chFilterWrap">
  <label>Channel</label>
- <select id="chFilter" onchange="saveFilters(); loadLiveData()">
- <option value="all">Semua Channel</option>
- <option value="WhatsApp">WhatsApp</option>
- <option value="Email">Email</option>
- <option value="Push">Push Notification</option>
- </select>
+ <button type="button" class="msdrop-btn" onclick="toggleDropdown('chFilterWrap')">Semua Channel ▾</button>
+ <div class="msdrop-panel" id="chFilterPanel">
+ <label><input type="checkbox" value="WhatsApp" checked onchange="onMultiFilterChange()"> WhatsApp</label>
+ <label><input type="checkbox" value="Email" checked onchange="onMultiFilterChange()"> Email</label>
+ <label><input type="checkbox" value="Push" checked onchange="onMultiFilterChange()"> Push Notification</label>
+ <label><input type="checkbox" value="SalesAI" checked onchange="onMultiFilterChange()"> Sales AI</label>
+ </div>
  </div>
  <div>
  <label>Bulan</label>
@@ -196,7 +206,7 @@
  <section class="row cols2">
  <div class="card">
  <h3>Trend Created & Paid Out - Jan s.d. Jul</h3>
- <div class="cap">New & Repeat+TopUp Jul = forecast (masih berjalan). LMT Jul = aktual final (aktivitas sudah dihentikan).</div>
+ <div class="cap">Semua bulan (termasuk Jul) adalah data aktual dari log transaksi.</div>
  <div class="chart-box tall"><canvas id="trendChart"></canvas></div>
  </div>
  <div class="card">
@@ -232,7 +242,7 @@
  <h3>Upper Funnel per Channel - Sent, Delivered, Click, Created</h3>
  <div class="cap" id="channelDetailCap">Mengikuti filter Bulan, Segmen & Channel</div>
  <div id="channelDetailTable"></div>
- <div class="note">Created per channel hanya tersedia untuk WhatsApp di segmen New &amp; Repeat+TopUp (leads yang dibuat lewat channel tsb - bukan total Created segmen). Email/Push dan WhatsApp-LMT tidak melacak Created per channel di sheet ini.</div>
+ <div class="note">Created &amp; Paid Out per channel sekarang tersedia untuk semua channel (termasuk Sales AI) &amp; semua segmen, diambil dari log transaksi Lower Funnel. Sent/Delivered/Click masih dari Upper Funnel, yang cuma punya data untuk New/Repeat+TopUp(gabungan)/LMT - tidak ada untuk Sales AI atau segmen SL.</div>
  </div>
  </section>
 
@@ -302,13 +312,31 @@
  </div>
  </section>
 
+ <!-- DEBUG PANEL -->
+ <section class="row" style="grid-template-columns:1fr;">
+ <div class="card">
+ <details>
+ <summary style="cursor:pointer;font-size:13.5px;font-weight:700;color:var(--text);"> Debug: Row Mapping Live-Fetch (klik untuk buka)</summary>
+ <div class="cap" style="margin-top:8px;">Menunjukkan hasil agregasi mentah dari log Lower Funnel & Target (total per segmen per bulan) dan status pemetaan Upper Funnel/Cost Detail per segmen - buka ini kalau ada angka yang kelihatan salah, tanpa perlu buka DevTools manual.</div>
+ <div id="debugPanelBody" style="margin-top:10px;overflow-x:auto;"></div>
+ </details>
+ </div>
+ </section>
+
  <footer class="df">CRM Performance Dashboard - AmarBank - Sumber: Report July 26 - Raw Data</footer>
 </div>
 
 <script>
 const BLUE = "#0083AF", BLUE_DARK = "#005F80", TEAL = "#00A9A0", LIME = "#B4D700";
 const GOOD = "#2F7D4F", BAD = "#B0342A", WARN = "#B4571F", MUTED = "#6B7A82";
-const SEG_COLORS = { "New": "#2B5A86", "Repeat+TopUp": "#2F7D4F", "LMT": "#9C3F57" };
+const SEG_COLORS = { "New": "#2B5A86", "Repeat": "#2F7D4F", "TopUp": "#4C8C6B", "LMT": "#9C3F57", "SL": "#8B5FBF" };
+const ALL_SEGMENTS = ["New","Repeat","TopUp","LMT","SL"];
+const ALL_CHANNELS = ["WhatsApp","Email","Push","SalesAI"];
+const CH_DISPLAY = { "WhatsApp":"WhatsApp", "Email":"Email", "Push":"Push Notification", "SalesAI":"Sales AI" };
+// Segmen dengan data Cost Detail & Upper Funnel (Sent/Delivered/Click, CPA, Cost). Sheet sumbernya
+// belum dipecah per segmen granular - "Repeat" & "TopUp" masih berbagi satu blok gabungan
+// "Repeat + Top Up", dan "SL" sama sekali tidak ada di kedua sheet ini.
+const COST_SOURCE_SEG = { "New":"New", "Repeat":"Repeat+TopUp", "TopUp":"Repeat+TopUp", "LMT":"LMT", "SL": null };
 
 // ===================== EMBEDDED DATA =====================
 const MONTHS = ["Jan","Feb","Mar","Apr","Mei","Jun","Jul"];
@@ -423,6 +451,31 @@ const WA_STATS_FALLBACK = {
  "Repeat+TopUp": { poolConvRate: 3232/321127, lastMonthWaBudget: 213264345, poCreatedRatio: 3936/7556 },
 };
 
+// ---- Expand legacy 3-segment fallback objects ("New"/"Repeat+TopUp"/"LMT") to the new
+// 5-segment key set. This is only ever used when the live fetch fails entirely (offline
+// safety net), so an approximate split (Repeat & TopUp both cloned from the old combined
+// figure, SL zeroed out) is acceptable here - it is never shown when live data is available.
+function expandLegacySegKeys(obj, zeroTemplateFn){
+ const out = {};
+ ALL_SEGMENTS.forEach(seg => {
+ if (seg === "SL") { out[seg] = zeroTemplateFn ? zeroTemplateFn() : null; return; }
+ if (seg === "Repeat" || seg === "TopUp") { out[seg] = obj["Repeat+TopUp"]; return; }
+ out[seg] = obj[seg];
+ });
+ return out;
+}
+[TREND_FALLBACK, CHANNEL_DETAIL_FALLBACK, COST_BY_CHANNEL_FALLBACK, COST_FALLBACK, CPA_FALLBACK,
+ PO_AMOUNT_COST_FALLBACK, CHANNEL_ENGAGE_FALLBACK, BUDGET_AUG_FALLBACK, AUG_COST_FALLBACK].forEach((obj,i) => {
+ const expanded = expandLegacySegKeys(obj);
+ Object.assign(obj, expanded); // add New Repeat/TopUp/SL keys in place, keep old keys too (harmless)
+});
+
+CHANNEL_FALLBACK.slice().forEach(r => {
+ if (r.seg === "Repeat+TopUp") { CHANNEL_FALLBACK.push({...r, seg:"Repeat"}); CHANNEL_FALLBACK.push({...r, seg:"TopUp"}); }
+});
+WA_STATS_FALLBACK.Repeat = WA_STATS_FALLBACK["Repeat+TopUp"];
+WA_STATS_FALLBACK.TopUp = WA_STATS_FALLBACK["Repeat+TopUp"];
+
 // Active data (starts as fallback, replaced by live fetch when available)
 let TREND = TREND_FALLBACK, COST = COST_FALLBACK, CPA = CPA_FALLBACK,
  PO_AMOUNT_COST = PO_AMOUNT_COST_FALLBACK, CHANNEL = CHANNEL_FALLBACK,
@@ -471,10 +524,8 @@ const UPPER_SEG_LABEL = { "New": "New", "Repeat+TopUp": "Repeat + Top Up", "LMT"
 const UPPER_CH_LABELS = ["Whatsapp", "Email", "Push Notification"];
 const UPPER_CH_KEY = { "Whatsapp": "WhatsApp", "Email": "Email", "Push Notification": "Push" };
 
-const LOWER_SEG_LABEL = { "New": "Target New 2026", "Repeat+TopUp": "Target Repeat PDF 2026", "LMT": "Target Repeat LMT 2026" };
-const LOWER_STAGE_LABEL = { created: "Created", afterFF: "After FF", eligible: "Eligible", accepted: "Accepted", paidOut: "Paid out", paidOutAmount: "Paid out Amount" };
-const LOWER_SUB_OFFSET = { target:0, actual:1, achievement:2, avgDaily:3, forecast:4, achv:5 };
-
+// Upper Funnel & Cost Detail masih pakai format pivot lama, dan cuma punya 3 blok segmen:
+// New / gabungan Repeat+TopUp / LMT - lihat COST_SOURCE_SEG di atas untuk pemetaannya.
 const COST_SEG_LABEL = { "New": "New", "Repeat+TopUp": "Repeat + Top Up", "LMT": "LMT" };
 
 function buildUpperIndex(rows){
@@ -508,32 +559,6 @@ function buildUpperIndex(rows){
  return idx;
 }
 
-function buildLowerIndex(rows){
- const segKeys = Object.keys(LOWER_SEG_LABEL);
- const segStart = {};
- segKeys.forEach(k => { segStart[k] = findLabelRow(rows, LOWER_SEG_LABEL[k], 0, rows.length); });
- const idx = {};
- segKeys.forEach(segKey => {
- const start = segStart[segKey];
- if (start < 0) { idx[segKey] = null; return; }
- let end = rows.length;
- segKeys.forEach(o => { const s = segStart[o]; if (o !== segKey && s > start && s < end) end = s; });
- idx[segKey] = {};
- Object.keys(LOWER_STAGE_LABEL).forEach(stageKey => {
- const label = LOWER_STAGE_LABEL[stageKey];
- const stageRow = findLabelRow(rows, label, start, end);
- let totalRow = -1;
- if (stageRow >= 0) {
- for (let i = stageRow; i < Math.min(stageRow + 6, end); i++) {
- if (cellText(rows, i, 2).toLowerCase() === "total") { totalRow = i; break; }
- }
- }
- idx[segKey][stageKey] = totalRow;
- });
- });
- return idx;
-}
-
 function buildCostIndex(rows){
  const idx = {};
  Object.keys(COST_SEG_LABEL).forEach(segKey => {
@@ -549,14 +574,6 @@ function buildCostIndex(rows){
  return idx;
 }
 
-function lowerVal(lowerRows, lowerIdx, seg, metric, month, sub){
- const segIdx = lowerIdx[seg];
- if (!segIdx) return null;
- const row0 = segIdx[metric];
- if (row0 == null || row0 < 0) return null;
- const col = 3 + 6 * (month - 1) + LOWER_SUB_OFFSET[sub];
- return valAt(lowerRows, row0, col);
-}
 function upperVal(upperRows, upperIdx, seg, ch, metric, month){
  const segIdx = upperIdx[seg];
  if (!segIdx || !segIdx[ch]) return null;
@@ -573,13 +590,84 @@ function costVal(costRows, costIdx, seg, type, month){
  const col = 2 + month;
  return valAt(costRows, row0, col);
 }
-function julCostDisplay(costRows, costIdx, lowerRows, lowerIdx, seg){
- const costActual = costVal(costRows, costIdx, seg, "Total", 7);
- if (JUL_MODE[seg] === "actual") return costActual;
- const poActual = lowerVal(lowerRows, lowerIdx, seg, "paidOut", 7, "actual");
- const poForecast = lowerVal(lowerRows, lowerIdx, seg, "paidOut", 7, "forecast");
- if (!poActual) return costActual;
- return costActual * (poForecast / poActual);
+
+// ---- LOWER FUNNEL: now a raw per-lead transaction log (previously a pivot/rekap table).
+// Columns: No | Created Date | Segment | Geo | Channel Attribute Logic | Created Apps |
+// After First Filter | Eligible | Accepted Apps | Paid Out | Paid Out Amount | Month
+const LOWER_LOG_COL = { segment:3, channel:5, created:6, afterFF:7, eligible:8, accepted:9, paidOut:10, paidOutAmount:11, month:12 };
+const RAW_SEG_TO_DASH_SEG = { "New":"New", "Repeat":"Repeat", "TopUp":"TopUp", "LMT":"LMT", "SL":"SL" };
+const RAW_CH_TO_DASH_CH = { "WhatsApp":"WhatsApp", "Email":"Email", "Push Notification":"Push", "Sales AI":"SalesAI" };
+
+function parseLowerFunnelLog(rows){
+ const headerRow = findLabelRow(rows, "No", 0, rows.length);
+ const dataStart = headerRow >= 0 ? headerRow + 1 : 0;
+ const bySeg = {}, bySegCh = {};
+ const zeroStage = () => ({ created:0, afterFF:0, eligible:0, accepted:0, paidOut:0, paidOutAmount:0, rows:0 });
+ const unrecognizedSeg = {};
+ for (let i = dataStart; i < rows.length; i++) {
+ const rawSeg = cellText(rows, i, LOWER_LOG_COL.segment);
+ if (!rawSeg) continue;
+ const seg = RAW_SEG_TO_DASH_SEG[rawSeg];
+ if (!seg) { unrecognizedSeg[rawSeg] = (unrecognizedSeg[rawSeg]||0) + 1; continue; }
+ const month = parseInt(cellText(rows, i, LOWER_LOG_COL.month), 10);
+ if (!month || month < 1 || month > 12) continue;
+ const v = {
+ created: valAt(rows, i, LOWER_LOG_COL.created) || 0,
+ afterFF: valAt(rows, i, LOWER_LOG_COL.afterFF) || 0,
+ eligible: valAt(rows, i, LOWER_LOG_COL.eligible) || 0,
+ accepted: valAt(rows, i, LOWER_LOG_COL.accepted) || 0,
+ paidOut: valAt(rows, i, LOWER_LOG_COL.paidOut) || 0,
+ paidOutAmount: valAt(rows, i, LOWER_LOG_COL.paidOutAmount) || 0,
+ };
+ bySeg[seg] = bySeg[seg] || {};
+ bySeg[seg][month] = bySeg[seg][month] || zeroStage();
+ Object.keys(v).forEach(k => bySeg[seg][month][k] += v[k]);
+ bySeg[seg][month].rows++;
+ const rawCh = cellText(rows, i, LOWER_LOG_COL.channel);
+ const ch = RAW_CH_TO_DASH_CH[rawCh];
+ if (ch) {
+ bySegCh[seg] = bySegCh[seg] || {};
+ bySegCh[seg][ch] = bySegCh[seg][ch] || {};
+ bySegCh[seg][ch][month] = bySegCh[seg][ch][month] || { created:0, paidOut:0, paidOutAmount:0 };
+ bySegCh[seg][ch][month].created += v.created;
+ bySegCh[seg][ch][month].paidOut += v.paidOut;
+ bySegCh[seg][ch][month].paidOutAmount += v.paidOutAmount;
+ }
+ }
+ return { bySeg, bySegCh, unrecognizedSeg, totalRowsRead: rows.length - dataStart };
+}
+
+// ---- TARGET: raw log. Columns: No | Segmen | Channel | Month | Funnel | Target
+const TARGET_LOG_COL = { segment:2, month:4, funnel:5, target:6 };
+const TARGET_MONTH_TO_NUM = { "Jan 26":1,"Feb 26":2,"Mar 26":3,"Apr 26":4,"May 26":5,"Jun 26":6,"Jul 26":7,"Aug 26":8,"Sep 26":9,"Oct 26":10,"Nov 26":11,"Dec 26":12 };
+const TARGET_FUNNEL_TO_KEY = { "Created":"created", "After FF":"afterFF", "Eligible":"eligible", "Accepted":"accepted", "Paid out":"paidOut", "Paid out Amount":"paidOutAmount" };
+function parseTargetLog(rows){
+ const headerRow = findLabelRow(rows, "No", 0, rows.length);
+ const dataStart = headerRow >= 0 ? headerRow + 1 : 0;
+ const bySeg = {};
+ for (let i = dataStart; i < rows.length; i++) {
+ const rawSeg = cellText(rows, i, TARGET_LOG_COL.segment);
+ if (!rawSeg) continue;
+ const seg = RAW_SEG_TO_DASH_SEG[rawSeg];
+ if (!seg) continue;
+ const monthNum = TARGET_MONTH_TO_NUM[cellText(rows, i, TARGET_LOG_COL.month)];
+ if (!monthNum) continue;
+ const metricKey = TARGET_FUNNEL_TO_KEY[cellText(rows, i, TARGET_LOG_COL.funnel)];
+ if (!metricKey) continue;
+ const val = valAt(rows, i, TARGET_LOG_COL.target) || 0;
+ bySeg[seg] = bySeg[seg] || {};
+ bySeg[seg][monthNum] = bySeg[seg][monthNum] || {};
+ bySeg[seg][monthNum][metricKey] = (bySeg[seg][monthNum][metricKey] || 0) + val;
+ }
+ return bySeg;
+}
+function lowerLogVal(agg, seg, metric, month){
+ const s = agg[seg]; if (!s || !s[month]) return null;
+ const v = s[month][metric]; return v == null ? null : v;
+}
+function targetVal(agg, seg, metric, month){
+ const s = agg[seg]; if (!s || !s[month]) return null;
+ const v = s[month][metric]; return v == null ? null : v;
 }
 
 function fetchViaAppsScript(sheetName){
@@ -617,152 +705,196 @@ async function fetchSheetCSV(sheetName){
  return parsed.data;
 }
 
-function computeFromSheets(lowerRows, upperRows, costRows){
- const SEGS = ["New","Repeat+TopUp","LMT"];
- const lowerIdx = buildLowerIndex(lowerRows);
+function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
+ const SEGS = ALL_SEGMENTS;
  const upperIdx = buildUpperIndex(upperRows);
  const costIdx = buildCostIndex(costRows);
+ const { bySeg: lowerAgg, bySegCh: lowerAggCh, unrecognizedSeg } = parseLowerFunnelLog(lowerRows);
+ const targetAgg = parseTargetLog(targetRows);
 
  const trend = {}, cost = {}, cpa = {}, poAmountCost = {}, budgetAug = {};
  const channelEngage = {}, channelDetail = {}, costByChannel = {};
 
  SEGS.forEach(seg => {
- // ---- TREND: Created & Paid Out, Jan..Jul (Jul respects JUL_MODE) ----
- const created = [], po = [];
+ const srcSeg = COST_SOURCE_SEG[seg]; // "New" / "Repeat+TopUp" / "LMT" / null (SL - no Cost/Upper Funnel source)
+
+ // ---- TREND: Created/Paid Out/funnel stages, Jan..Jul, aggregated straight from the raw log ----
+ const created=[], po=[], afterFF=[], eligible=[], accepted=[];
  for (let m = 1; m <= 7; m++) {
- if (m === 7 && JUL_MODE[seg] === "forecast") {
- created.push(lowerVal(lowerRows, lowerIdx, seg, "created", 7, "forecast"));
- po.push(lowerVal(lowerRows, lowerIdx, seg, "paidOut", 7, "forecast"));
- } else {
- created.push(lowerVal(lowerRows, lowerIdx, seg, "created", m, "actual"));
- po.push(lowerVal(lowerRows, lowerIdx, seg, "paidOut", m, "actual"));
+ created.push(lowerLogVal(lowerAgg, seg, "created", m));
+ po.push(lowerLogVal(lowerAgg, seg, "paidOut", m));
+ afterFF.push(lowerLogVal(lowerAgg, seg, "afterFF", m));
+ eligible.push(lowerLogVal(lowerAgg, seg, "eligible", m));
+ accepted.push(lowerLogVal(lowerAgg, seg, "accepted", m));
  }
- }
- trend[seg] = { created, po, julLabel: JUL_MODE[seg] === "forecast" ? "forecast" : "aktual final" };
+ const hasEligible = eligible.some(v => v != null && v > 0);
+ trend[seg] = { created, po, afterFF, eligible: hasEligible ? eligible : null, accepted, julLabel: "aktual" };
 
- // ---- COST: always actual, Jan..Jul ----
- cost[seg] = [1,2,3,4,5,6,7].map(m => costVal(costRows, costIdx, seg, "Total", m));
+ // ---- COST: only where a Cost Detail source exists ----
+ cost[seg] = srcSeg ? [1,2,3,4,5,6,7].map(m => costVal(costRows, costIdx, srcSeg, "Total", m)) : [null,null,null,null,null,null,null];
 
- // ---- Funnel stages (afterFF, eligible[New only], accepted), Jan..Jul, respecting JUL_MODE ----
- const hasEligible = lowerIdx[seg] && lowerIdx[seg].eligible >= 0;
- const afterFF = [], eligible = hasEligible ? [] : null, accepted = [];
- for (let m = 1; m <= 7; m++) {
- const sub = (m === 7 && JUL_MODE[seg] === "forecast") ? "forecast" : "actual";
- afterFF.push(lowerVal(lowerRows, lowerIdx, seg, "afterFF", m, sub));
- if (hasEligible) eligible.push(lowerVal(lowerRows, lowerIdx, seg, "eligible", m, sub));
- accepted.push(lowerVal(lowerRows, lowerIdx, seg, "accepted", m, sub));
- }
- trend[seg].afterFF = afterFF;
- trend[seg].eligible = eligible;
- trend[seg].accepted = accepted;
-
- // ---- Channel detail: Sent/Delivered/Click/Created per channel, Jan..Jul ----
+ // ---- Channel detail: Sent/Delivered/Click from Upper Funnel (srcSeg only). Created/Paid Out/Paid
+ // Out Amount now come straight from the Lower Funnel log per channel - available for every
+ // segment & channel (including Sales AI and SL), which the old sheet format couldn't do.
  channelDetail[seg] = {};
- ["WhatsApp","Email","Push"].forEach(ch => {
- const hasCreated = !!(upperIdx[seg] && upperIdx[seg][ch] && upperIdx[seg][ch].created >= 0);
- const sent=[], delivered=[], click=[], created = hasCreated ? [] : null;
+ ALL_CHANNELS.forEach(ch => {
+ const sent=[], delivered=[], click=[], created=[], paidOut=[], paidOutAmount=[];
  for (let m = 1; m <= 7; m++) {
- sent.push(upperVal(upperRows, upperIdx, seg, ch, "sent", m));
- delivered.push(upperVal(upperRows, upperIdx, seg, ch, "delivered", m));
- click.push(upperVal(upperRows, upperIdx, seg, ch, "click", m));
- if (hasCreated) created.push(upperVal(upperRows, upperIdx, seg, ch, "created", m));
+ sent.push(srcSeg ? upperVal(upperRows, upperIdx, srcSeg, ch, "sent", m) : null);
+ delivered.push(srcSeg ? upperVal(upperRows, upperIdx, srcSeg, ch, "delivered", m) : null);
+ click.push(srcSeg ? upperVal(upperRows, upperIdx, srcSeg, ch, "click", m) : null);
+ const chAgg = lowerAggCh[seg] && lowerAggCh[seg][ch] && lowerAggCh[seg][ch][m];
+ created.push(chAgg ? chAgg.created : null);
+ paidOut.push(chAgg ? chAgg.paidOut : null);
+ paidOutAmount.push(chAgg ? chAgg.paidOutAmount : null);
  }
- channelDetail[seg][ch] = { sent, delivered, click, created };
+ channelDetail[seg][ch] = {
+ sent: sent.some(v=>v!=null) ? sent : null, delivered: delivered.some(v=>v!=null) ? delivered : null,
+ click: click.some(v=>v!=null) ? click : null, created: created.some(v=>v!=null) ? created : null,
+ paidOut, paidOutAmount,
+ };
  });
 
- // ---- Cost by channel, Jan..Jul (Push always 0 - covered under MoEngage subscription) ----
- costByChannel[seg] = {
- WhatsApp: [1,2,3,4,5,6,7].map(m => costVal(costRows, costIdx, seg, "WhatsApp", m)),
- Email: [1,2,3,4,5,6,7].map(m => costVal(costRows, costIdx, seg, "Email", m)),
+ // ---- Cost by channel (only where a Cost Detail source exists) ----
+ costByChannel[seg] = srcSeg ? {
+ WhatsApp: [1,2,3,4,5,6,7].map(m => costVal(costRows, costIdx, srcSeg, "WhatsApp", m)),
+ Email: [1,2,3,4,5,6,7].map(m => costVal(costRows, costIdx, srcSeg, "Email", m)),
  Push: [0,0,0,0,0,0,0],
+ SalesAI: null,
+ } : { WhatsApp:null, Email:null, Push:null, SalesAI:null };
+
+ // ---- CPA Jun/Jul (needs a cost source; null when unavailable, e.g. SL) ----
+ const poJun = lowerLogVal(lowerAgg, seg, "paidOut", 6), poJul = lowerLogVal(lowerAgg, seg, "paidOut", 7);
+ const costJun = srcSeg ? costVal(costRows, costIdx, srcSeg, "Total", 6) : null;
+ const costJul = srcSeg ? costVal(costRows, costIdx, srcSeg, "Total", 7) : null;
+ cpa[seg] = (costJun != null && poJun) ? { jun: costJun/poJun, jul: (costJul != null && poJul) ? costJul/poJul : null } : null;
+
+ // ---- Paid Out Amount vs Cost ----
+ const junAmt = lowerLogVal(lowerAgg, seg, "paidOutAmount", 6);
+ const julAmt = lowerLogVal(lowerAgg, seg, "paidOutAmount", 7);
+ poAmountCost[seg] = (costJun != null) ? { junAmt, junCost: costJun, julAmt, julCost: costJul } : null;
+
+ // ---- Budget Agustus: Target Paid Out (dari sheet Target) x CPA Jun ----
+ const targetPO = targetVal(targetAgg, seg, "paidOut", 8);
+ const cpaSeg = cpa[seg];
+ budgetAug[seg] = targetPO == null ? null : {
+ targetPO,
+ budgetBase: cpaSeg ? targetPO * cpaSeg.jun : null,
+ budgetDownside: cpaSeg ? targetPO * (cpaSeg.jul != null ? cpaSeg.jul : cpaSeg.jun) : null,
  };
 
- // ---- CPA Jun / Jul (Cost actual / Paid Out actual - ratio-invariant to forecast scaling) ----
- const poJunActual = lowerVal(lowerRows, lowerIdx, seg, "paidOut", 6, "actual");
- const poJulActual = lowerVal(lowerRows, lowerIdx, seg, "paidOut", 7, "actual");
- const costJunActual = costVal(costRows, costIdx, seg, "Total", 6);
- const costJulActual = costVal(costRows, costIdx, seg, "Total", 7);
- const cpaJun = costJunActual / poJunActual;
- const cpaJul = costJulActual / poJulActual;
- cpa[seg] = { jun: cpaJun, jul: cpaJul };
-
- // ---- Paid Out Amount vs Cost (Jun actual, Jul per JUL_MODE) ----
- const junAmt = lowerVal(lowerRows, lowerIdx, seg, "paidOutAmount", 6, "actual");
- const julAmt = JUL_MODE[seg] === "actual"
- ? lowerVal(lowerRows, lowerIdx, seg, "paidOutAmount", 7, "actual")
- : lowerVal(lowerRows, lowerIdx, seg, "paidOutAmount", 7, "forecast");
- const julCost = julCostDisplay(costRows, costIdx, lowerRows, lowerIdx, seg);
- poAmountCost[seg] = { junAmt, junCost: costJunActual, julAmt, julCost };
-
- // ---- Budget Agustus: Target PO (Aug) x CPA Jun; downside x CPA Jul (LMT stays at CPA Jun, conservative) ----
- const targetPO = lowerVal(lowerRows, lowerIdx, seg, "paidOut", 8, "target");
- const budgetBase = targetPO * cpaJun;
- const budgetDownside = seg === "LMT" ? budgetBase : targetPO * cpaJul;
- budgetAug[seg] = { targetPO, budgetBase, budgetDownside };
-
- // ---- Channel engagement Sent/Delivered/Click, Jun & Jul ----
+ // ---- Channel engagement Sent/Delivered/Click Jun & Jul ----
  channelEngage[seg] = {};
- ["WhatsApp","Email","Push"].forEach(ch => {
- channelEngage[seg][ch] = {
- sentJun: upperVal(upperRows, upperIdx, seg, ch, "sent", 6), deliveredJun: upperVal(upperRows, upperIdx, seg, ch, "delivered", 6), clickJun: upperVal(upperRows, upperIdx, seg, ch, "click", 6),
- sentJul: upperVal(upperRows, upperIdx, seg, ch, "sent", 7), deliveredJul: upperVal(upperRows, upperIdx, seg, ch, "delivered", 7), clickJul: upperVal(upperRows, upperIdx, seg, ch, "click", 7),
- };
+ ALL_CHANNELS.forEach(ch => {
+ channelEngage[seg][ch] = srcSeg ? {
+ sentJun: upperVal(upperRows, upperIdx, srcSeg, ch, "sent", 6), deliveredJun: upperVal(upperRows, upperIdx, srcSeg, ch, "delivered", 6), clickJun: upperVal(upperRows, upperIdx, srcSeg, ch, "click", 6),
+ sentJul: upperVal(upperRows, upperIdx, srcSeg, ch, "sent", 7), deliveredJul: upperVal(upperRows, upperIdx, srcSeg, ch, "delivered", 7), clickJul: upperVal(upperRows, upperIdx, srcSeg, ch, "click", 7),
+ } : { sentJun:0, deliveredJun:0, clickJun:0, sentJul:0, deliveredJul:0, clickJul:0 };
  });
  });
 
- // ---- Channel CPC table (WA/Email have real cost; Push cost = 0 by definition - covered under MoEngage subscription) ----
+ // ---- Channel CPC table: only segments with a cost source (SL left out entirely, as requested) ----
  const channel = [];
  SEGS.forEach(seg => {
+ const srcSeg = COST_SOURCE_SEG[seg];
+ if (!srcSeg) return;
  ["WhatsApp","Email","Push"].forEach(ch => {
  const e = channelEngage[seg][ch];
  let cpcJun = 0, cpcJul = 0;
  if (ch !== "Push") {
- const cJun = costVal(costRows, costIdx, seg, ch, 6), cJul = costVal(costRows, costIdx, seg, ch, 7);
+ const cJun = costVal(costRows, costIdx, srcSeg, ch, 6), cJul = costVal(costRows, costIdx, srcSeg, ch, 7);
  cpcJun = e.clickJun ? cJun / e.clickJun : 0;
  cpcJul = e.clickJul ? cJul / e.clickJul : 0;
  }
  let delta = "-", note = "";
- if (ch === "Push") {
- note = `${nf(e.clickJun)}->${nf(e.clickJul)} klik`;
- } else if (!e.clickJun) {
- note = "0 klik";
- }
+ if (ch === "Push") { note = `${nf(e.clickJun)}->${nf(e.clickJul)} klik`; }
+ else if (!e.clickJun) { note = "0 klik"; }
  let rec;
- if (ch === "Push") {
- rec = (e.clickJun === 0 && e.clickJul === 0) ? "fix" : "up";
- } else if (!cpcJun) {
- rec = "fix";
- } else {
- const d = (cpcJul - cpcJun) / cpcJun;
- delta = `${d>=0?'+':''}${Math.round(d*100)}%`;
- rec = d > 0.3 ? "fix" : (d > 0 ? "hold" : "up");
- }
+ if (ch === "Push") { rec = (e.clickJun === 0 && e.clickJul === 0) ? "fix" : "up"; }
+ else if (!cpcJun) { rec = "fix"; }
+ else { const d = (cpcJul - cpcJun) / cpcJun; delta = `${d>=0?'+':''}${Math.round(d*100)}%`; rec = d > 0.3 ? "fix" : (d > 0 ? "hold" : "up"); }
  channel.push({ seg, ch, cpcJun: Math.round(cpcJun), cpcJul: Math.round(cpcJul), delta, note, rec });
  });
  });
 
- // ---- Cost Agustus aktual (bulan ke-8) untuk alert pemakaian budget ----
+ // ---- Cost Agustus aktual (untuk alert pemakaian budget) ----
  const augCost = {};
- SEGS.forEach(seg => { augCost[seg] = costVal(costRows, costIdx, seg, "Total", 8) || 0; });
+ SEGS.forEach(seg => { const srcSeg = COST_SOURCE_SEG[seg]; augCost[seg] = srcSeg ? (costVal(costRows, costIdx, srcSeg, "Total", 8) || 0) : 0; });
 
- // ---- Statistik WhatsApp (pooled conversion rate Created/Sent, 3 bulan terakhir - recency-weighted, referensi budget bulan terakhir) ----
+ // ---- Statistik WhatsApp pooled 3 bulan terakhir (untuk kalkulator pacing) ----
  const waStats = {};
- ["New","Repeat+TopUp"].forEach(seg => {
+ SEGS.forEach(seg => {
  const d = channelDetail[seg].WhatsApp;
- if (d.created) {
+ if (d && d.created) {
  const last3Created = d.created.slice(-3).reduce((a,b)=>a+(b||0),0);
- const last3Sent = d.sent.slice(-3).reduce((a,b)=>a+(b||0),0);
+ const last3Sent = d.sent ? d.sent.slice(-3).reduce((a,b)=>a+(b||0),0) : 0;
  const last3PoCreated = trend[seg].created.slice(-3).reduce((a,b)=>a+(b||0),0);
  const last3Po = trend[seg].po.slice(-3).reduce((a,b)=>a+(b||0),0);
  waStats[seg] = {
  poolConvRate: last3Sent ? last3Created/last3Sent : 0,
- lastMonthWaBudget: costByChannel[seg].WhatsApp[6] || 0,
+ lastMonthWaBudget: (costByChannel[seg].WhatsApp && costByChannel[seg].WhatsApp[6]) || 0,
  poCreatedRatio: last3PoCreated ? last3Po/last3PoCreated : 0,
  };
  }
  });
 
- return { trend, cost, cpa, poAmountCost, channel, channelEngage, budgetAug, channelDetail, costByChannel, augCost, waStats };
+ return { trend, cost, cpa, poAmountCost, channel, channelEngage, budgetAug, channelDetail, costByChannel, augCost, waStats,
+ debug: { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, upperIdx, costIdx } };
+}
+
+// ===================== DEBUG PANEL (self-diagnosis, no DevTools needed) =====================
+// Shows exactly which row the live-fetch logic matched for every metric/channel/segment, plus
+// that row's raw text, so mismatches (wrong sheet structure, ambiguous labels, moved sections)
+// are visible directly in the dashboard instead of needing manual CSV screenshots.
+let LAST_DEBUG = null;
+function rowPreview(rows, row0, maxCols){
+ if (row0 == null || row0 < 0 || !rows[row0]) return "(baris tidak ditemukan)";
+ const r = rows[row0];
+ return `[baris CSV #${row0+1}] ` + r.slice(0, maxCols || 6).map(c => `"${c}"`).join(", ");
+}
+function renderDebugPanel(){
+ const el = document.getElementById("debugPanelBody");
+ if (!el) return;
+ if (!LAST_DEBUG) { el.innerHTML = `<p class='note'>Belum ada data live (masih pakai fallback/cache) - debug panel hanya aktif setelah fetch live berhasil.</p>`; return; }
+ const { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, upperIdx, costIdx } = LAST_DEBUG;
+ let html = "";
+
+ const unrecKeys = Object.keys(unrecognizedSeg || {});
+ if (unrecKeys.length) {
+ html += `<div class='balert-msg warn' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[WARNING]</span><div><b>Nilai Segment tidak dikenali di Lower Funnel log:</b> ${unrecKeys.map(k=>`"${k}" (${unrecognizedSeg[k]} baris)`).join(', ')} - baris ini di-skip, tidak ikut terhitung di manapun.</div></div>`;
+ }
+
+ html += `<h4 style='font-size:12px;margin:14px 0 6px;'>Lower Funnel (log mentah, ${lowerRows.length} baris CSV) - Total per Segmen per Bulan</h4><table class='dt'><thead><tr><th>Segmen</th><th>Bulan</th><th class='num'>Jumlah baris</th><th class='num'>Created</th><th class='num'>After FF</th><th class='num'>Eligible</th><th class='num'>Accepted</th><th class='num'>Paid Out</th><th class='num'>Paid Out Amount</th></tr></thead><tbody>`;
+ ALL_SEGMENTS.forEach(seg => {
+ const segData = lowerAgg[seg];
+ if (!segData) { html += `<tr><td>${seg}</td><td colspan='7' style='color:var(--bad);'>Tidak ada baris log untuk segmen ini</td></tr>`; return; }
+ for (let m = 1; m <= 7; m++) {
+ const d = segData[m];
+ if (!d) { html += `<tr><td>${seg}</td><td>${MONTHS[m-1]}</td><td colspan='6' style='color:var(--muted);'>Tidak ada data</td></tr>`; continue; }
+ html += `<tr><td>${seg}</td><td>${MONTHS[m-1]}</td><td class='num'>${d.rows}</td><td class='num'>${nf(d.created)}</td><td class='num'>${nf(d.afterFF)}</td><td class='num'>${nf(d.eligible)}</td><td class='num'>${nf(d.accepted)}</td><td class='num'>${nf(d.paidOut)}</td><td class='num'>${rp(d.paidOutAmount)}</td></tr>`;
+ }
+ });
+ html += `</tbody></table>`;
+
+ html += `<h4 style='font-size:12px;margin:14px 0 6px;'>Target (log mentah, ${targetRows.length} baris CSV) - Target Paid Out per Segmen</h4><table class='dt'><thead><tr><th>Segmen</th><th>Bulan</th><th class='num'>Target Paid Out</th></tr></thead><tbody>`;
+ ALL_SEGMENTS.forEach(seg => {
+ const segData = targetAgg[seg];
+ if (!segData) { html += `<tr><td>${seg}</td><td colspan='2' style='color:var(--bad);'>Tidak ada baris target untuk segmen ini</td></tr>`; return; }
+ [7,8].forEach(m => {
+ const v = segData[m] ? segData[m].paidOut : null;
+ html += `<tr><td>${seg}</td><td>${MONTHS[m-1] || 'Ags'}</td><td class='num'>${v!=null ? nf(v) : '<span style="color:var(--bad);">tidak ada</span>'}</td></tr>`;
+ });
+ });
+ html += `</tbody></table>`;
+
+ html += `<h4 style='font-size:12px;margin:14px 0 6px;'>Upper Funnel & Cost Detail (format pivot lama, dipetakan lewat COST_SOURCE_SEG)</h4><table class='dt'><thead><tr><th>Segmen dashboard</th><th>Sumber di Upper Funnel / Cost Detail</th><th>Status</th></tr></thead><tbody>`;
+ ALL_SEGMENTS.forEach(seg => {
+ const src = COST_SOURCE_SEG[seg];
+ html += `<tr><td>${seg}</td><td>${src || '-'}</td><td>${src ? (upperIdx[src] ? 'ketemu di Upper Funnel' : '<span style="color:var(--bad);">header segmen tidak ketemu</span>') : '<span style="color:var(--muted);">sengaja di-exclude (tidak ada sumber)</span>'}</td></tr>`;
+ });
+ html += `</tbody></table>`;
+
+ el.innerHTML = html;
 }
 
 async function loadLiveData(){
@@ -771,15 +903,17 @@ async function loadLiveData(){
  btn.disabled = true;
  statusEl.textContent = " Menarik data terbaru dari Google Sheet...";
  try {
- const [lowerRows, upperRows, costRows] = await Promise.all([
- fetchSheetCSV("Lower Funnel"), fetchSheetCSV("Upper Funnel"), fetchSheetCSV("Cost Detail"),
+ const [lowerRows, upperRows, costRows, targetRows] = await Promise.all([
+ fetchSheetCSV("Lower Funnel"), fetchSheetCSV("Upper Funnel"), fetchSheetCSV("Cost Detail"), fetchSheetCSV("Target"),
  ]);
- const computed = computeFromSheets(lowerRows, upperRows, costRows);
+ const computed = computeFromSheets(lowerRows, upperRows, costRows, targetRows);
  TREND = computed.trend; COST = computed.cost; CPA = computed.cpa;
  PO_AMOUNT_COST = computed.poAmountCost; CHANNEL = computed.channel;
  CHANNEL_ENGAGE = computed.channelEngage; BUDGET_AUG = computed.budgetAug;
  CHANNEL_DETAIL = computed.channelDetail; COST_BY_CHANNEL = computed.costByChannel;
  AUG_COST = computed.augCost; WA_STATS = computed.waStats;
+ LAST_DEBUG = computed.debug;
+ renderDebugPanel();
  if (!calcInitializedWithLiveData) { renderPacingCalculator(getFilters()); calcInitializedWithLiveData = true; }
 
  const now = new Date();
@@ -804,29 +938,61 @@ function rp(v){ return "Rp" + Math.round(v).toLocaleString("id-ID"); }
 function rpJt(v){ return "Rp" + (v/1e6).toFixed(1).replace(".",",") + "jt"; }
 function nf(v){ return Math.round(v).toLocaleString("id-ID"); }
 function pct(v,d=1){ return (v*100).toFixed(d).replace(".",",") + "%"; }
-function segs(filter){ return filter === "all" ? Object.keys(TREND) : [filter]; }
-function chans(filter){ return filter === "all" ? ["WhatsApp","Email","Push"] : [filter]; }
+function segs(filter){ return filter; } // filter is already the selected array from getFilters()
+function chans(filter){ return filter; }
+function segCapText(segArr){ return segArr.length >= ALL_SEGMENTS.length ? '' : ' - Segmen: '+segArr.join(', '); }
+function chCapText(chArr){ return chArr.length >= ALL_CHANNELS.length ? '' : ' - Channel: '+chArr.map(c=>CH_DISPLAY[c]||c).join(', '); }
+// Segments that actually have Cost Detail / Upper Funnel data (excludes SL, per request).
+function costSegs(filterArr){ return filterArr.filter(seg => COST_SOURCE_SEG[seg]); }
 
 let charts = {};
 let calcInitializedWithLiveData = false;
 
+function checkedValues(panelId){
+ return Array.from(document.querySelectorAll(`#${panelId} input[type=checkbox]:checked`)).map(el => el.value);
+}
 function getFilters(){
  const monthVal = document.getElementById("monthFilter").value;
+ const segSel = checkedValues("segFilterPanel");
+ const chSel = checkedValues("chFilterPanel");
  return {
- seg: document.getElementById("segFilter").value,
- ch: document.getElementById("chFilter").value,
+ seg: segSel.length ? segSel : ALL_SEGMENTS.slice(),
+ ch: chSel.length ? chSel : ALL_CHANNELS.slice(),
  month: monthVal === "all" ? "all" : parseInt(monthVal, 10),
  };
 }
 function monthLabel(m){ return m === "all" ? "Semua Bulan (Jan-Jul)" : MONTHS[m]; }
+
+function toggleDropdown(wrapId){
+ const panel = document.getElementById(wrapId === "segFilterWrap" ? "segFilterPanel" : "chFilterPanel");
+ const isOpen = panel.classList.contains("open");
+ document.querySelectorAll(".msdrop-panel").forEach(p => p.classList.remove("open"));
+ if (!isOpen) panel.classList.add("open");
+}
+document.addEventListener("click", (e) => {
+ if (!e.target.closest(".msdrop")) document.querySelectorAll(".msdrop-panel").forEach(p => p.classList.remove("open"));
+});
+function updateDropdownLabel(wrapId, panelId, allValues, allLabel){
+ const btn = document.querySelector(`#${wrapId} .msdrop-btn`);
+ const checked = checkedValues(panelId);
+ if (checked.length === 0 || checked.length === allValues.length) btn.textContent = `${allLabel} ▾`;
+ else if (checked.length === 1) btn.textContent = `${checked[0]} ▾`;
+ else btn.textContent = `${checked.length} dipilih ▾`;
+}
+function onMultiFilterChange(){
+ updateDropdownLabel("segFilterWrap", "segFilterPanel", ALL_SEGMENTS, "Semua Segmen");
+ updateDropdownLabel("chFilterWrap", "chFilterPanel", ALL_CHANNELS, "Semua Channel");
+ saveFilters();
+ loadLiveData();
+}
 
 // Simpan & pulihkan pilihan filter (Segmen/Channel/Bulan) lewat localStorage, supaya tetap kepilih
 // walaupun halaman di-reload penuh (browser refresh) atau dibuka lagi nanti.
 function saveFilters(){
  try {
  localStorage.setItem("crmDashboardFilters", JSON.stringify({
- seg: document.getElementById("segFilter").value,
- ch: document.getElementById("chFilter").value,
+ seg: checkedValues("segFilterPanel"),
+ ch: checkedValues("chFilterPanel"),
  month: document.getElementById("monthFilter").value,
  }));
  } catch (e) { /* localStorage tidak tersedia, abaikan */ }
@@ -836,9 +1002,15 @@ function restoreFilters(){
  const saved = localStorage.getItem("crmDashboardFilters");
  if (!saved) return;
  const f = JSON.parse(saved);
- if (f.seg) document.getElementById("segFilter").value = f.seg;
- if (f.ch) document.getElementById("chFilter").value = f.ch;
+ if (Array.isArray(f.seg)) {
+ document.querySelectorAll("#segFilterPanel input[type=checkbox]").forEach(el => { el.checked = f.seg.includes(el.value); });
+ }
+ if (Array.isArray(f.ch)) {
+ document.querySelectorAll("#chFilterPanel input[type=checkbox]").forEach(el => { el.checked = f.ch.includes(el.value); });
+ }
  if (f.month) document.getElementById("monthFilter").value = f.month;
+ updateDropdownLabel("segFilterWrap", "segFilterPanel", ALL_SEGMENTS, "Semua Segmen");
+ updateDropdownLabel("chFilterWrap", "chFilterPanel", ALL_CHANNELS, "Semua Channel");
  } catch (e) { /* abaikan kalau data tersimpan rusak/tidak valid */ }
 }
 
@@ -846,46 +1018,61 @@ function restoreFilters(){
 function renderKPIs(f){
  const list = segs(f.seg);
  const m = f.month;
- const chSel = f.ch; // "all" | "WhatsApp" | "Email" | "Push"
- const chLabel = chSel === "all" ? "" : ` (${chSel})`;
+ const chSelArr = f.ch; // array of selected channels
+ const allChSelected = chSelArr.length >= ALL_CHANNELS.length;
+ const chLabel = allChSelected ? "" : ` (${chSelArr.map(c=>CH_DISPLAY[c]||c).join(', ')})`;
 
- // Created: pakai data per-channel kalau tersedia (cuma WhatsApp New & Repeat+TopUp yang punya).
- // Kalau channel dipilih tapi kombinasi seg+channel itu tidak melacak Created, dianggap 0 (bukan total semua channel).
  function createdFor(seg, monthIdx){
- if (chSel === "all") return TREND[seg].created[monthIdx];
- const d = CHANNEL_DETAIL[seg][chSel];
- if (!d || !d.created) return null; // tidak ada data Created untuk kombinasi ini
- return d.created[monthIdx];
+ if (allChSelected) return TREND[seg].created[monthIdx];
+ let total = 0, any = false;
+ chSelArr.forEach(ch => {
+ const d = CHANNEL_DETAIL[seg][ch];
+ if (d && d.created && d.created[monthIdx] != null) { total += d.created[monthIdx]; any = true; }
+ });
+ return any ? total : null;
  }
  function createdSum(monthIdx){
  let total = 0, anyData = false;
  list.forEach(seg => { const v = createdFor(seg, monthIdx); if (v != null) { total += v; anyData = true; } });
  return anyData ? total : null;
  }
- // Total Cost: bisa genuinely per-channel lewat COST_BY_CHANNEL.
- function costSum(monthIdx){
- if (chSel === "all") return list.reduce((s,seg)=> s + COST[seg][monthIdx], 0);
- return list.reduce((s,seg)=> {
- const arr = COST_BY_CHANNEL[seg][chSel];
- return s + (arr ? (arr[monthIdx] || 0) : 0);
- }, 0);
+ // Paid Out per channel sekarang tersedia (dari log Lower Funnel) - dipakai kalau channel dipilih spesifik.
+ function poFor(seg, monthIdx){
+ if (allChSelected) return TREND[seg].po[monthIdx];
+ let total = 0, any = false;
+ chSelArr.forEach(ch => {
+ const d = CHANNEL_DETAIL[seg][ch];
+ if (d && d.paidOut && d.paidOut[monthIdx] != null) { total += d.paidOut[monthIdx]; any = true; }
+ });
+ return any ? total : null;
  }
- // Paid Out: TIDAK ADA breakdown per channel sama sekali di sheet (Lower Funnel cuma level segmen).
  function poSum(monthIdx){
- return list.reduce((s,seg)=> s + TREND[seg].po[monthIdx], 0);
+ let total = 0, anyData = false;
+ list.forEach(seg => { const v = poFor(seg, monthIdx); if (v != null) { total += v; anyData = true; } });
+ return anyData ? total : null;
+ }
+ function costSum(monthIdx){
+ if (allChSelected) return list.reduce((s,seg)=> s + (COST[seg][monthIdx]||0), 0);
+ return list.reduce((s,seg)=> {
+ let segTotal = 0;
+ chSelArr.forEach(ch => { const arr = COST_BY_CHANNEL[seg][ch]; if (arr) segTotal += (arr[monthIdx] || 0); });
+ return s + segTotal;
+ }, 0);
  }
 
  if (m === "all") {
- let createdM = 0, anyCreated = false;
- for (let i=0;i<7;i++){ const v = createdSum(i); if (v!=null){ createdM += v; anyCreated = true; } }
- const poM = poSum ? [0,1,2,3,4,5,6].reduce((s,i)=>s+poSum(i),0) : 0;
+ let createdM = 0, anyCreated = false, poM = 0, anyPo = false;
+ for (let i=0;i<7;i++){
+ const cv = createdSum(i); if (cv!=null){ createdM += cv; anyCreated = true; }
+ const pv = poSum(i); if (pv!=null){ poM += pv; anyPo = true; }
+ }
  const costM = [0,1,2,3,4,5,6].reduce((s,i)=>s+costSum(i),0);
  const cpaM = poM ? costM/poM : 0;
  const createdVal = anyCreated ? nf(createdM) : "-";
  const cards = [
- { l:`Created - Total Jan-Jul${chLabel}`, v: createdVal, s: anyCreated ? "Akumulasi 7 bulan" : "Tidak ada data Created per channel untuk kombinasi ini", cls:"neu" },
- { l:"Paid Out - Total Jan-Jul", v: nf(poM), s: chSel==="all" ? "Akumulasi 7 bulan" : "Paid Out tidak dipecah per channel di sheet - ini total semua channel", cls:"neu" },
- { l:"CPA - Blended Jan-Jul", v: rp(cpaM), s: chSel==="all" ? "Cost / Paid Out, seluruh periode" : "Cost channel ini / Paid Out semua channel (Paid Out tak terpecah per channel)", cls:"neu" },
+ { l:`Created - Total Jan-Jul${chLabel}`, v: createdVal, s: anyCreated ? "Akumulasi 7 bulan" : "Tidak ada data Created untuk kombinasi ini", cls:"neu" },
+ { l:`Paid Out - Total Jan-Jul${chLabel}`, v: anyPo ? nf(poM) : "-", s: anyPo ? "Akumulasi 7 bulan" : "Tidak ada data Paid Out untuk kombinasi ini", cls:"neu" },
+ { l:"CPA - Blended Jan-Jul", v: rp(cpaM), s: allChSelected ? "Cost / Paid Out, seluruh periode" : "Cost channel terpilih / Paid Out channel terpilih", cls:"neu" },
  { l:`Total Cost - Jan-Jul${chLabel}`, v: rpJt(costM), s:"Akumulasi 7 bulan", cls:"neu" },
  ];
  document.getElementById("kpiRow").innerHTML = cards.map(c => `
@@ -909,8 +1096,8 @@ function renderKPIs(f){
 
  const monthName = MONTHS[m];
  const prevName = hasPrev ? MONTHS[m-1] : null;
- const createdValid = createdM != null;
  const createdPrevValid = createdPrev != null;
+ const poPrevValid = poPrev != null;
 
  const cards = [
  { l:`Created - ${monthName}${chLabel}`,
@@ -918,11 +1105,12 @@ function renderKPIs(f){
  s: !createdValid ? "Tidak ada data Created untuk kombinasi ini"
  : (hasPrev && createdPrevValid ? `${createdM>=createdPrev?'+':''}${pct(createdM/createdPrev-1)} vs ${prevName}` : `Data awal periode / tidak ada pembanding`),
  cls: (hasPrev && createdPrevValid) ? (createdM>=createdPrev?'pos':'neg') : 'neu' },
- { l:`Paid Out - ${monthName}`, v: nf(poM),
- s: (chSel!=="all" ? "Tidak terpecah per channel - " : "") + (hasPrev ? `${poM>=poPrev?'+':''}${pct(poM/poPrev-1)} vs ${prevName}` : `Data awal periode`),
- cls: hasPrev ? (poM>=poPrev?'pos':'neg') : 'neu' },
+ { l:`Paid Out - ${monthName}${chLabel}`, v: poValid ? nf(poM) : "-",
+ s: !poValid ? "Tidak ada data Paid Out untuk kombinasi ini"
+ : (hasPrev && poPrevValid ? `${poM>=poPrev?'+':''}${pct(poM/poPrev-1)} vs ${prevName}` : `Data awal periode`),
+ cls: (hasPrev && poPrevValid) ? (poM>=poPrev?'pos':'neg') : 'neu' },
  { l:`CPA - ${monthName}${chLabel}`, v: rp(cpaM),
- s: (chSel!=="all" ? "Cost channel ini / Paid Out semua channel - " : "") + (hasPrev && cpaPrev ? `${cpaM>=cpaPrev?'+':''}${pct(cpaM/cpaPrev-1)} vs ${prevName}` : `Data awal periode`),
+ s: (hasPrev && cpaPrev ? `${cpaM>=cpaPrev?'+':''}${pct(cpaM/cpaPrev-1)} vs ${prevName}` : `Data awal periode`),
  cls: (hasPrev && cpaPrev) ? (cpaM<=cpaPrev?'pos':'neg') : 'neu' },
  { l:`Total Cost - ${monthName}${chLabel}`, v: rpJt(costM),
  s: hasPrev ? `${costM>=costPrev?'+':''}${pct(costM/costPrev-1)} vs ${prevName}` : `Data awal periode`,
@@ -1028,7 +1216,7 @@ function renderChannelEngageChart(f){
  const jul = metrics.map(m => sum(m.toLowerCase(), "Jul"));
 
  document.getElementById("channelEngageCap").textContent =
- `Sent / Delivered / Click - ${chList.length===3 ? 'semua channel' : chList[0]}, segmen: ${segList.length===3?'semua':segList.join(', ')} (data granular hanya tersedia Jun-Jul)`;
+ `Sent / Delivered / Click${chCapText(chList)}${segCapText(segList)} (data granular hanya tersedia Jun-Jul; Sales AI & segmen SL belum punya data Sent/Delivered/Click di sheet)`;
 
  if (charts.chengage) charts.chengage.destroy();
  charts.chengage = new Chart(ctx, {
@@ -1051,10 +1239,11 @@ function renderChannelEngageChart(f){
 // ===================== CPA CHART =====================
 function renderCpaChart(f){
  const ctx = document.getElementById("cpaChart").getContext("2d");
- const list = segs(f.seg);
- const jun = list.map(seg => CPA[seg].jun);
- const jul = list.map(seg => CPA[seg].jul);
+ const list = costSegs(f.seg);
+ const jun = list.map(seg => CPA[seg] ? CPA[seg].jun : null);
+ const jul = list.map(seg => CPA[seg] ? CPA[seg].jul : null);
  if (charts.cpa) charts.cpa.destroy();
+ if (!list.length) { ctx.canvas.parentElement.innerHTML = `<div style='text-align:center;color:var(--muted);padding:16px;'>Tidak ada segmen dengan data Cost pada filter ini</div>`; return; }
  charts.cpa = new Chart(ctx, {
  type: "bar",
  data: {
@@ -1068,7 +1257,7 @@ function renderCpaChart(f){
  responsive: true, maintainAspectRatio: false,
  plugins: {
  legend: { position: "bottom", labels: { boxWidth: 12, font: { size: 10.5 } } },
- tooltip: { callbacks: { label: c => `${c.dataset.label}: ${rp(c.parsed.y)}` } }
+ tooltip: { callbacks: { label: c => `${c.dataset.label}: ${c.parsed.y!=null?rp(c.parsed.y):'-'}` } }
  },
  scales: { y: { beginAtZero: true, ticks: { callback: v => rp(v) } } }
  }
@@ -1078,10 +1267,11 @@ function renderCpaChart(f){
 // ===================== BUDGET CHART =====================
 function renderBudgetChart(f){
  const ctx = document.getElementById("budgetChart").getContext("2d");
- const list = segs(f.seg);
- const base = list.map(seg => BUDGET_AUG[seg].budgetBase);
- const downside = list.map(seg => BUDGET_AUG[seg].budgetDownside);
+ const list = costSegs(f.seg);
+ const base = list.map(seg => BUDGET_AUG[seg] ? BUDGET_AUG[seg].budgetBase : null);
+ const downside = list.map(seg => BUDGET_AUG[seg] ? BUDGET_AUG[seg].budgetDownside : null);
  if (charts.budget) charts.budget.destroy();
+ if (!list.length) { ctx.canvas.parentElement.innerHTML = `<div style='text-align:center;color:var(--muted);padding:16px;'>Tidak ada segmen dengan data Budget pada filter ini</div>`; document.getElementById("budgetRisk").innerHTML=""; return; }
  charts.budget = new Chart(ctx, {
  type: "bar",
  data: {
@@ -1095,14 +1285,14 @@ function renderBudgetChart(f){
  responsive: true, maintainAspectRatio: false,
  plugins: {
  legend: { position: "bottom", labels: { boxWidth: 12, font: { size: 10.5 } } },
- tooltip: { callbacks: { label: c => `${c.dataset.label}: ${rpJt(c.parsed.y)}` } }
+ tooltip: { callbacks: { label: c => `${c.dataset.label}: ${c.parsed.y!=null?rpJt(c.parsed.y):'-'}` } }
  },
  scales: { y: { beginAtZero: true, ticks: { callback: v => rpJt(v) } } }
  }
  });
 
- const totalBase = list.reduce((s,seg)=>s+BUDGET_AUG[seg].budgetBase,0);
- const totalDownside = list.reduce((s,seg)=>s+BUDGET_AUG[seg].budgetDownside,0);
+ const totalBase = list.reduce((s,seg)=>s+((BUDGET_AUG[seg]&&BUDGET_AUG[seg].budgetBase)||0),0);
+ const totalDownside = list.reduce((s,seg)=>s+((BUDGET_AUG[seg]&&BUDGET_AUG[seg].budgetDownside)||0),0);
  const riskEl = document.getElementById("budgetRisk");
  if (totalDownside > 500000000) {
  riskEl.innerHTML = `<b>Risiko:</b> kalau tren CPC Juli berlanjut, budget riil bisa naik ke ${rpJt(totalDownside)} - lewat cap Rp500jt sebesar ${rpJt(totalDownside-500000000)}.`;
@@ -1149,7 +1339,7 @@ function renderFunnelRatioTable(f){
  html += `<th class='num'>Accepted - Created %</th><th class='num'>Paid Out - Created %</th></tr></thead><tbody>`;
 
  if (m === "all") {
- document.getElementById("funnelRatioCap").textContent = `Semua Bulan (Jan-Jul, pooled ratio)${f.seg!=='all' ? ' - Segmen: '+f.seg : ''}`;
+ document.getElementById("funnelRatioCap").textContent = `Semua Bulan (Jan-Jul, pooled ratio)${segCapText(f.seg)}`;
  list.forEach(seg => {
  const t = TREND[seg];
  html += `<tr><td><b style='color:${SEG_COLORS[seg]}'>${seg}</b></td>`;
@@ -1164,7 +1354,7 @@ function renderFunnelRatioTable(f){
  return;
  }
 
- document.getElementById("funnelRatioCap").textContent = `Bulan: ${MONTHS[m]}${f.seg!=='all' ? ' - Segmen: '+f.seg : ''} - pp = perbandingan vs rata-rata bulan sebelumnya`;
+ document.getElementById("funnelRatioCap").textContent = `Bulan: ${MONTHS[m]}${segCapText(f.seg)} - pp = perbandingan vs rata-rata bulan sebelumnya`;
 
  list.forEach(seg => {
  const t = TREND[seg];
@@ -1193,7 +1383,7 @@ function renderChannelDetailTable(f){
  const m = f.month;
  const val = (arr) => arr ? (m === "all" ? sumArr(arr) : arr[m]) : null;
  document.getElementById("channelDetailCap").textContent =
- `${m === 'all' ? 'Semua Bulan (Jan-Jul, akumulasi)' : 'Bulan: '+MONTHS[m]}${f.seg!=='all' ? ' - Segmen: '+f.seg : ''}${f.ch!=='all' ? ' - Channel: '+f.ch : ''} - panjang bar Delivered & Click relatif terhadap Sent (100%)`;
+ `${m === 'all' ? 'Semua Bulan (Jan-Jul, akumulasi)' : 'Bulan: '+MONTHS[m]}${segCapText(f.seg)}${chCapText(f.ch)} - panjang bar Delivered & Click relatif terhadap Sent (100%)`;
 
  const CH_COLOR = { WhatsApp: BLUE, Email: TEAL, Push: LIME };
  let html = "";
@@ -1249,7 +1439,7 @@ function renderCostByChannelTable(f){
  const hasPrev = m !== "all" && m > 0;
  const getCur = (arr) => arr ? (m === "all" ? sumArr(arr) : arr[m]) : null;
  document.getElementById("costByChannelCap").textContent =
- `${m === 'all' ? 'Semua Bulan (Jan-Jul, akumulasi)' : 'Bulan: '+MONTHS[m]}${f.seg!=='all' ? ' - Segmen: '+f.seg : ''}${f.ch!=='all' ? ' - Channel: '+f.ch : ''} - panjang bar relatif terhadap channel termahal`;
+ `${m === 'all' ? 'Semua Bulan (Jan-Jul, akumulasi)' : 'Bulan: '+MONTHS[m]}${segCapText(f.seg)}${chCapText(f.ch)} - panjang bar relatif terhadap channel termahal`;
 
  const CH_COLOR = { WhatsApp: BLUE, Email: TEAL, Push: LIME };
  let html = "";
@@ -1362,7 +1552,7 @@ function renderChannelInsight(f){
 
 function renderChannelTable(f){
  const chList = chans(f.ch);
- const rows = CHANNEL.filter(r => (f.seg === "all" || r.seg === f.seg) && chList.includes(r.ch));
+ const rows = CHANNEL.filter(r => (f.seg.includes(r.seg)) && chList.includes(r.ch));
  const recLabel = { up: ["Kuatkan","up"], hold: ["Tahan/Monitor","hold"], fix: ["Fix dulu","fix"] };
  let html = `<thead><tr>
  <th>Segmen</th><th>Channel</th><th class='num'>CPC Jun</th><th class='num'>CPC Jul</th><th class='num'>Delta</th><th>Catatan</th><th>Rekomendasi</th>
@@ -1390,24 +1580,26 @@ function renderChannelTable(f){
 
 // ===================== COST RATIO TABLE =====================
 function renderCostRatioTable(f){
- const list = segs(f.seg);
+ const list = costSegs(f.seg);
  let html = `<thead><tr>
  <th>Segmen</th><th class='num'>Paid Out Amount Jun</th><th class='num'>Cost Jun</th><th class='num'>Cost Ratio Jun</th>
  <th class='num'>Paid Out Amount Jul</th><th class='num'>Cost Jul</th><th class='num'>Cost Ratio Jul</th>
  </tr></thead><tbody>`;
+ if (!list.length) html += `<tr><td colspan='7' style='text-align:center;color:var(--muted);padding:16px;'>Tidak ada segmen dengan data Cost pada filter ini</td></tr>`;
  list.forEach(seg => {
  const d = PO_AMOUNT_COST[seg];
+ if (!d) { html += `<tr><td><b style='color:${SEG_COLORS[seg]}'>${seg}</b></td><td colspan='6' style='color:var(--muted);'>Data tidak tersedia</td></tr>`; return; }
  const ratioJun = d.junCost / d.junAmt;
- const ratioJul = d.julCost / d.julAmt;
- const cls = ratioJul > ratioJun ? "neg" : "pos";
+ const ratioJul = d.julCost != null ? d.julCost / d.julAmt : null;
+ const cls = (ratioJul!=null && ratioJul > ratioJun) ? "neg" : "pos";
  html += `<tr>
  <td><b style='color:${SEG_COLORS[seg]}'>${seg}</b></td>
  <td class='num'>${rp(d.junAmt)}</td>
  <td class='num'>${rp(d.junCost)}</td>
  <td class='num'>${pct(ratioJun,2)}</td>
- <td class='num'>${rp(d.julAmt)}</td>
- <td class='num'>${rp(d.julCost)}</td>
- <td class='num'><span class='pill ${cls}'>${pct(ratioJul,2)}</span></td>
+ <td class='num'>${d.julAmt!=null?rp(d.julAmt):'-'}</td>
+ <td class='num'>${d.julCost!=null?rp(d.julCost):'-'}</td>
+ <td class='num'>${ratioJul!=null?`<span class='pill ${cls}'>${pct(ratioJul,2)}</span>`:'-'}</td>
  </tr>`;
  });
  html += "</tbody>";
@@ -1416,11 +1608,11 @@ function renderCostRatioTable(f){
 
 // ===================== BUDGET USAGE ALERT =====================
 function renderBudgetAlert(f){
- const list = segs(f.seg);
- document.getElementById("budgetAlertCap").textContent = f.seg !== "all" ? `Segmen: ${f.seg}` : "Semua segmen";
+ const list = costSegs(f.seg);
+ document.getElementById("budgetAlertCap").textContent = list.length === ALL_SEGMENTS.filter(s=>COST_SOURCE_SEG[s]).length ? "Semua segmen (SL tidak punya data cost)" : `Segmen: ${list.join(', ') || '(tidak ada yang punya data cost)'}`;
 
  const used = list.reduce((s,seg)=> s + (AUG_COST[seg]||0), 0);
- const planned = list.reduce((s,seg)=> s + BUDGET_AUG[seg].budgetBase, 0);
+ const planned = list.reduce((s,seg)=> s + ((BUDGET_AUG[seg]&&BUDGET_AUG[seg].budgetBase)||0), 0);
  const pct = planned ? (used/planned*100) : 0;
  const capped = Math.min(pct, 100);
 
@@ -1465,16 +1657,18 @@ const STRIPE_COLOR_HEX = "#F5F8F9";
 
 // ===================== WEEKLY PACING CALCULATOR =====================
 function renderPacingCalculator(f){
- const defaultSeg = (f && (f.seg === "New" || f.seg === "Repeat+TopUp")) ? f.seg : "New";
+ const available = ALL_SEGMENTS.filter(seg => WA_STATS[seg]);
+ const preferred = f && Array.isArray(f.seg) ? f.seg.find(s => available.includes(s)) : null;
+ const defaultSeg = preferred || available[0] || "New";
  const container = document.getElementById("pacingCalc");
  if (!container) return;
+ if (!available.length) { container.innerHTML = `<p class='note'>Belum ada data WhatsApp (Sent &amp; Created) yang cukup untuk segmen manapun.</p>`; return; }
  container.innerHTML = `
  <div class='calc-inputs'>
  <div class='calc-field'>
  <label>Segmen</label>
  <select id='calcSeg' onchange='onCalcSegChange()'>
- <option value='New' ${defaultSeg==='New'?'selected':''}>New</option>
- <option value='Repeat+TopUp' ${defaultSeg==='Repeat+TopUp'?'selected':''}>Repeat+TopUp</option>
+ ${available.map(seg => `<option value='${seg}' ${defaultSeg===seg?'selected':''}>${seg}</option>`).join("")}
  </select>
  </div>
  <div class='calc-field'>
