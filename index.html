@@ -599,10 +599,13 @@ function buildUpperIndex(rows){
  const from = funnelHdr >= 0 ? funnelHdr + 1 : chStart;
  let clickRow = findLabelRow(rows, "Click", from, chEnd);
  if (clickRow < 0) clickRow = findLabelRow(rows, "Click / Open", from, chEnd);
+ let openRow = findLabelRow(rows, "Open / Read", from, chEnd);
+ if (openRow < 0) openRow = findLabelRow(rows, "Open", from, chEnd);
  idx[segKey][UPPER_CH_KEY[chLabel]] = {
  sent: findLabelRow(rows, "Sent", from, chEnd),
  delivered: findLabelRow(rows, "Delivered", from, chEnd),
  click: clickRow,
+ open: openRow,
  created: findLabelRow(rows, "Created", from, chEnd),
  };
  });
@@ -928,13 +931,13 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  budgetDownside: cpaSeg ? targetPO * (cpaSeg.jul != null ? cpaSeg.jul : cpaSeg.jun) : null,
  };
 
- // ---- Channel engagement Sent/Delivered/Click Jun & Jul ----
+ // ---- Channel engagement Sent/Delivered/Click/Open Jun & Jul ----
  channelEngage[seg] = {};
  ALL_CHANNELS.forEach(ch => {
  channelEngage[seg][ch] = srcSeg ? {
- sentJun: upperVal(upperRows, upperIdx, srcSeg, ch, "sent", 6), deliveredJun: upperVal(upperRows, upperIdx, srcSeg, ch, "delivered", 6), clickJun: upperVal(upperRows, upperIdx, srcSeg, ch, "click", 6),
- sentJul: upperVal(upperRows, upperIdx, srcSeg, ch, "sent", 7), deliveredJul: upperVal(upperRows, upperIdx, srcSeg, ch, "delivered", 7), clickJul: upperVal(upperRows, upperIdx, srcSeg, ch, "click", 7),
- } : { sentJun:0, deliveredJun:0, clickJun:0, sentJul:0, deliveredJul:0, clickJul:0 };
+ sentJun: upperVal(upperRows, upperIdx, srcSeg, ch, "sent", 6), deliveredJun: upperVal(upperRows, upperIdx, srcSeg, ch, "delivered", 6), clickJun: upperVal(upperRows, upperIdx, srcSeg, ch, "click", 6), openJun: upperVal(upperRows, upperIdx, srcSeg, ch, "open", 6),
+ sentJul: upperVal(upperRows, upperIdx, srcSeg, ch, "sent", 7), deliveredJul: upperVal(upperRows, upperIdx, srcSeg, ch, "delivered", 7), clickJul: upperVal(upperRows, upperIdx, srcSeg, ch, "click", 7), openJul: upperVal(upperRows, upperIdx, srcSeg, ch, "open", 7),
+ } : { sentJun:0, deliveredJun:0, clickJun:0, openJun:0, sentJul:0, deliveredJul:0, clickJul:0, openJul:0 };
  });
  });
 
@@ -1648,44 +1651,62 @@ function renderChannelEngageChart(f){
 
  const sum = (metric, monthKey) => {
  let total = 0;
- segList.forEach(seg => chList.forEach(ch => { total += CHANNEL_ENGAGE[seg][ch][metric + monthKey]; }));
+ segList.forEach(seg => chList.forEach(ch => { total += (CHANNEL_ENGAGE[seg][ch][metric + monthKey] || 0); }));
  return total;
  };
- const metrics = ["Sent","Delivered","Click"];
- const jun = metrics.map(m => sum(m.toLowerCase(), "Jun"));
- const jul = metrics.map(m => sum(m.toLowerCase(), "Jul"));
+ const sentJun = sum("sent","Jun"), deliveredJun = sum("delivered","Jun"), clickJun = sum("click","Jun"), openJun = sum("open","Jun");
+ const sentJul = sum("sent","Jul"), deliveredJul = sum("delivered","Jul"), clickJul = sum("click","Jul"), openJul = sum("open","Jul");
+
+ // Rates computed from the aggregated totals above (not averaged from per-channel sheet %), so
+ // they stay correct under any multi-select segment/channel combination.
+ const deliveryRateJun = sentJun ? deliveredJun/sentJun : null, deliveryRateJul = sentJul ? deliveredJul/sentJul : null;
+ const readRateJun = deliveredJun ? openJun/deliveredJun : null, readRateJul = deliveredJul ? openJul/deliveredJul : null;
+ const clickRateJun = sentJun ? clickJun/sentJun : null, clickRateJul = sentJul ? clickJul/sentJul : null;
 
  document.getElementById("channelEngageCap").textContent =
- `Sent / Delivered / Click${chCapText(chList)}${segCapText(segList)} (data granular hanya tersedia Jun-Jul; Sales AI & segmen SL belum punya data Sent/Delivered/Click di sheet)`;
+ `Bar = Sent/Delivered/Click (jumlah). Garis = Delivery Rate, Read Rate (Open/Delivered), Click Rate/CTR (Click/Sent)${chCapText(chList)}${segCapText(segList)} (data granular hanya tersedia Jun-Jul; Sales AI & segmen SL belum punya data ini di sheet)`;
 
  if (charts.chengage) charts.chengage.destroy();
  charts.chengage = new Chart(ctx, {
  type: "bar",
  data: {
- labels: metrics,
+ labels: ["Juni", "Juli"],
  datasets: [
- { label: "Juni", data: jun, backgroundColor: BLUE_DARK + "CC", borderRadius: 4 },
- { label: "Juli", data: jul, backgroundColor: LIME + "DD", borderRadius: 4 },
+ { type: "bar", label: "Sent", data: [sentJun, sentJul], backgroundColor: BLUE_DARK + "AA", borderRadius: 4, yAxisID: "y", order: 3 },
+ { type: "bar", label: "Delivered", data: [deliveredJun, deliveredJul], backgroundColor: TEAL + "AA", borderRadius: 4, yAxisID: "y", order: 3 },
+ { type: "bar", label: "Click", data: [clickJun, clickJul], backgroundColor: LIME + "AA", borderRadius: 4, yAxisID: "y", order: 3 },
+ { type: "line", label: "Delivery Rate", data: [deliveryRateJun, deliveryRateJul], borderColor: BLUE_DARK, backgroundColor: BLUE_DARK, yAxisID: "y1", tension: .2, borderWidth: 2, pointRadius: 4, order: 1 },
+ { type: "line", label: "Read Rate", data: [readRateJun, readRateJul], borderColor: TEAL, backgroundColor: TEAL, yAxisID: "y1", tension: .2, borderWidth: 2, pointRadius: 4, order: 1 },
+ { type: "line", label: "Click Rate (CTR)", data: [clickRateJun, clickRateJul], borderColor: WARN, backgroundColor: WARN, yAxisID: "y1", tension: .2, borderWidth: 2, pointRadius: 4, order: 1 },
  ]
  },
  options: {
  responsive: true, maintainAspectRatio: false,
- plugins: { legend: { position: "bottom", labels: { boxWidth: 12, font: { size: 10.5 } } } },
- scales: { y: { beginAtZero: true, ticks: { callback: v => nf(v) } } }
+ plugins: {
+ legend: { position: "bottom", labels: { boxWidth: 12, font: { size: 10.5 } } },
+ tooltip: { callbacks: { label: c => c.dataset.yAxisID === "y1" ? `${c.dataset.label}: ${c.parsed.y!=null?pct(c.parsed.y,2):'-'}` : `${c.dataset.label}: ${nf(c.parsed.y)}` } }
+ },
+ scales: {
+ y: { beginAtZero: true, position: "left", ticks: { callback: v => nf(v) }, title: { display: true, text: "Jumlah", font: { size: 10 } } },
+ y1: { beginAtZero: true, position: "right", grid: { drawOnChartArea: false }, ticks: { callback: v => pct(v,0) }, title: { display: true, text: "Rate", font: { size: 10 } } },
+ }
  }
  });
 
  const el = document.getElementById("channelEngageFIR");
  if (el) {
- const [sentJun, deliveredJun, clickJun] = jun;
- const [sentJul, deliveredJul, clickJul] = jul;
  if (!sentJun || !sentJul) {
  el.innerHTML = firHtml("Tidak ada data Sent untuk kombinasi filter ini.","-","-");
  } else {
  const delivTest = twoProportionZTest(deliveredJul, sentJul, deliveredJun, sentJun);
  const clickTest = twoProportionZTest(clickJul, sentJul, clickJun, sentJun);
  const delivV = zVerdict(delivTest.z), clickV = zVerdict(clickTest.z);
- const findings = `Delivery rate: ${pct(delivTest.p2,2)} (Jun) → ${pct(delivTest.p1,2)} (Jul). Click rate (dari Sent): ${pct(clickTest.p2,2)} (Jun) → ${pct(clickTest.p1,2)} (Jul).`;
+ let readPart = "";
+ if (openJun && openJul && deliveredJun && deliveredJul) {
+ const readTest = twoProportionZTest(openJul, deliveredJul, openJun, deliveredJun);
+ readPart = ` Read rate: ${pct(readTest.p2,2)} (Jun) → ${pct(readTest.p1,2)} (Jul), ${zVerdict(readTest.z).text} (z=${readTest.z.toFixed(2)}).`;
+ }
+ const findings = `Delivery rate: ${pct(delivTest.p2,2)} (Jun) → ${pct(delivTest.p1,2)} (Jul). Click rate (dari Sent): ${pct(clickTest.p2,2)} (Jun) → ${pct(clickTest.p1,2)} (Jul).${readPart}`;
  const insight = `Perubahan delivery rate ${delivV.text} (z=${delivTest.z.toFixed(2)}). Perubahan click rate ${clickV.text} (z=${clickTest.z.toFixed(2)}).`;
  let recommendation;
  if (delivTest.z <= -1.96) recommendation = `Delivery rate turun signifikan - kemungkinan ada masalah kualitas nomor/kontak atau kebijakan provider (WhatsApp/Email) yang berubah, cek dulu sebelum nambah volume kirim.`;
