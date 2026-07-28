@@ -898,6 +898,59 @@ function weekBandLabel(day){
  return { label: "Minggu 4 (tgl 25-31)", type: "ramai" };
 }
 
+// ---- STRATEGIC PACING ANALYSIS (senior CRM analyst layer) ----
+// Data-driven weekly weight: pools Created across every day of history available for this
+// segment+channel (not just last month), split into the 4 week-bands, and takes each band's share
+// of the grand total. Pooling (vs. averaging month-by-month %) naturally weights more-recent/more-
+// complete months more heavily since they contribute more raw volume - a reasonable default when
+// month lengths and data completeness vary.
+function historicalWeekWeights(bySegChDate, seg, ch){
+ const chData = bySegChDate[seg] && bySegChDate[seg][ch];
+ if (!chData) return null;
+ const bandTotal = {1:0,2:0,3:0,4:0};
+ let grand = 0, dayCount = 0;
+ Object.keys(chData).forEach(dateStr => {
+ const day = Number(dateStr.slice(8,10));
+ const val = chData[dateStr].created || 0;
+ const band = day<=7?1:(day<=15?2:(day<=24?3:4));
+ bandTotal[band] += val; grand += val; dayCount++;
+ });
+ if (!grand || dayCount < 14) return null; // need at least ~2 weeks of history for this to mean anything
+ return { w1: bandTotal[1]/grand, w2: bandTotal[2]/grand, w3: bandTotal[3]/grand, w4: bandTotal[4]/grand, dayCount, grand };
+}
+
+// Ranks channels by cost-efficiency (Rp spent per Created) for a segment, using the latest month
+// with both cost and created data. Only meaningful for segments with a Cost Detail source.
+function channelEfficiencyRanking(seg){
+ const srcSeg = COST_SOURCE_SEG[seg];
+ if (!srcSeg || !CHANNEL_DETAIL[seg]) return null;
+ const results = [];
+ ["WhatsApp","Email","Push","SalesAI"].forEach(ch => {
+ const createdArr = CHANNEL_DETAIL[seg][ch] && CHANNEL_DETAIL[seg][ch].created;
+ const costArr = COST_BY_CHANNEL[seg] && COST_BY_CHANNEL[seg][ch];
+ if (!createdArr || createdArr[6] == null) return;
+ const created = createdArr[6];
+ const cost = costArr ? costArr[6] : null;
+ if (cost == null || !created) return;
+ results.push({ ch, created, cost, costPerCreated: cost/created });
+ });
+ return results.length ? results.sort((a,b)=>a.costPerCreated-b.costPerCreated) : null;
+}
+
+// Delivery/Read/Click rate diagnostics for one segment+channel, Jun vs Jul, using the same
+// two-proportion z-test as the main Engagement section - scoped down for the pacing tool.
+function engagementDiagnostics(seg, ch){
+ const e = CHANNEL_ENGAGE[seg] && CHANNEL_ENGAGE[seg][ch];
+ if (!e || !e.sentJun || !e.sentJul) return null;
+ const delivTest = twoProportionZTest(e.deliveredJul, e.sentJul, e.deliveredJun, e.sentJun);
+ const clickTest = twoProportionZTest(e.clickJul, e.sentJul, e.clickJun, e.sentJun);
+ let readTest = null;
+ if (e.openJun && e.openJul && e.deliveredJun && e.deliveredJul) {
+ readTest = twoProportionZTest(e.openJul, e.deliveredJul, e.openJun, e.deliveredJun);
+ }
+ return { delivTest, clickTest, readTest };
+}
+
 function fetchViaAppsScript(sheetName){
  return new Promise((resolve, reject) => {
  google.script.run
@@ -2609,6 +2662,69 @@ function renderBudgetAlert(f){
 }
 const STRIPE_COLOR_HEX = "#F5F8F9";
 
+// ===================== STRATEGIC PACING RECOMMENDATION (CRM analyst POV) =====================
+function renderPacingStrategy(seg, weeks, totalW, budget, targetCreatedInput, targetPoInput, totalCreated, totalPo){
+ const box = document.getElementById("calcStrategyBox");
+ if (!box) return;
+ const sections = [];
+
+ // 1. Channel focus - which channel gives the most Created per Rupiah spent for this segment.
+ const ranking = channelEfficiencyRanking(seg);
+ if (ranking && ranking.length) {
+ const best = ranking[0];
+ const waEntry = ranking.find(r => r.ch === "WhatsApp");
+ let channelText = `Ranking efisiensi channel segmen ${seg} (Rp per Created, data Jul): ${ranking.map(r=>`${CH_DISPLAY[r.ch]||r.ch} ${rp(r.costPerCreated)}`).join(' &lt; ')}.`;
+ if (waEntry && best.ch !== "WhatsApp") {
+ channelText += ` <b>${CH_DISPLAY[best.ch]||best.ch} lebih efisien dari WhatsApp</b> (${rp(best.costPerCreated)} vs ${rp(waEntry.costPerCreated)} per Created) - pertimbangkan geser 10-15% budget dari WhatsApp ke situ buat uji coba, meski WhatsApp tetap relevan buat skala/reach volume besar.`;
+ } else {
+ channelText += ` WhatsApp adalah channel paling efisien saat ini untuk segmen ini - fokus budget di WhatsApp masih tepat, nggak perlu dialihkan.`;
+ }
+ sections.push({ title: "Channel Focus", body: channelText });
+ }
+
+ // 2. Metrics to monitor - pulled from the same per-segment focus rule used elsewhere in the dashboard.
+ const metrics = SEGMENT_FOCUS_METRICS[seg] || ["created","paidOut","paidOutAmount"];
+ sections.push({ title: "Metrik yang Wajib Dipantau Mingguan", body: `Untuk segmen ${seg}, fokus pantau <b>${metrics.map(m=>METRIC_LABEL[m]).join(', ')}</b> tiap minggu (bukan nunggu akhir bulan) - kalau salah satu di bawah pace target di minggu berjalan, ambil tindakan minggu itu juga. Nunggu sampai akhir bulan berarti kehilangan waktu buat koreksi.` });
+
+ // 3. Delivery/Read/Click rate diagnostics -> concrete content/A-B test recommendations, tied to
+ // WHICH specific metric is weak (delivery = technical issue, read = timing/preview, click = content/offer).
+ const diag = engagementDiagnostics(seg, "WhatsApp");
+ if (diag) {
+ const { delivTest, clickTest, readTest } = diag;
+ const parts = [];
+ const delivTier = zTier(delivTest.z);
+ if (delivTier === "strong" || delivTier === "significant") {
+ parts.push(delivTest.z < 0
+ ? `<b>Delivery rate turun ${zVerdict(delivTest.z).text.toLowerCase()}</b> (${pct(delivTest.p2,1)} → ${pct(delivTest.p1,1)}) - ini soal teknis pengiriman, BUKAN konten. Cek: kualitas nomor/list (opt-out, nomor invalid), status template WhatsApp Business (approved/pending/kena banned), dan rate limiting dari provider.`
+ : `Delivery rate membaik (${pct(delivTest.p2,1)} → ${pct(delivTest.p1,1)}) - setup pengiriman saat ini bagus, pertahankan.`);
+ }
+ if (readTest) {
+ const readTier = zTier(readTest.z);
+ if (readTier === "strong" || readTier === "significant") {
+ parts.push(readTest.z < 0
+ ? `<b>Read rate turun</b> (${pct(readTest.p2,1)} → ${pct(readTest.p1,1)}) - kemungkinan soal <i>timing</i> kirim atau preview text kurang menarik dibuka. A/B test: jam kirim pagi (08.00-10.00) vs sore (16.00-18.00), dan preview text formal vs casual.`
+ : `Read rate membaik (${pct(readTest.p2,1)} → ${pct(readTest.p1,1)}) - waktu kirim &amp; preview text saat ini efektif, pertahankan.`);
+ }
+ }
+ const clickTier = zTier(clickTest.z);
+ if (clickTier === "strong" || clickTier === "significant") {
+ parts.push(clickTest.z < 0
+ ? `<b>Click rate turun</b> (${pct(clickTest.p2,1)} → ${pct(clickTest.p1,1)}) - delivery &amp; read normal, jadi ini soal <i>isi pesan/offer</i>, bukan teknis. A/B test: 2 varian CTA (urgency "Buruan sebelum habis" vs benefit-driven "Dapatkan diskon X%"), atau tawaran/insentif yang beda.`
+ : `Click rate membaik (${pct(clickTest.p2,1)} → ${pct(clickTest.p1,1)}) - konten/CTA saat ini resonan, coba scale up pola yang sama ke segmen lain.`);
+ }
+ if (!parts.length) parts.push(`Delivery, Read, dan Click rate semuanya stabil dalam rentang wajar bulan ini - nggak ada red flag di sisi engagement, fokus optimasi bisa dialihkan ke volume/budget dulu.`);
+ sections.push({ title: "Delivery / Read / Click Rate & Rekomendasi Konten", body: parts.join('<br><br>') });
+ } else {
+ sections.push({ title: "Delivery / Read / Click Rate", body: `Belum cukup data Jun-Jul untuk channel WhatsApp segmen ini buat dianalisis.` });
+ }
+
+ box.innerHTML = `
+ <div style='border-top:1px solid var(--border);padding-top:14px;'>
+ <h4 style='font-size:13px;margin:0 0 10px;color:var(--text);'> Rekomendasi Strategis (POV CRM Analyst)</h4>
+ ${sections.map(s => `<div style='margin-bottom:12px;'><div style='font-weight:700;font-size:11.5px;color:var(--blue-dark);margin-bottom:4px;'>${s.title}</div><div style='font-size:12px;line-height:1.6;'>${s.body}</div></div>`).join('')}
+ </div>`;
+}
+
 // ===================== WEEKLY PACING CALCULATOR =====================
 function renderPacingCalculator(f){
  const available = ALL_SEGMENTS.filter(seg => WA_STATS[seg]);
@@ -2617,6 +2733,10 @@ function renderPacingCalculator(f){
  const container = document.getElementById("pacingCalc");
  if (!container) return;
  if (!available.length) { container.innerHTML = `<p class='note'>Belum ada data WhatsApp (Sent &amp; Created) yang cukup untuk segmen manapun.</p>`; return; }
+ const hist = FORECAST_SOURCE ? historicalWeekWeights(FORECAST_SOURCE.bySegChDate, defaultSeg, "WhatsApp") : null;
+ const w = hist ? { w1: Math.round(hist.w1*100), w2: Math.round(hist.w2*100), w3: Math.round(hist.w3*100), w4: Math.round(hist.w4*100) } : { w1:30, w2:20, w3:20, w4:30 };
+ // rounding can make these not sum to exactly 100 - nudge week4 to absorb the remainder
+ w.w4 = 100 - w.w1 - w.w2 - w.w3;
  container.innerHTML = `
  <div class='calc-inputs'>
  <div class='calc-field'>
@@ -2652,15 +2772,17 @@ function renderPacingCalculator(f){
  </div>
  </div>
  <div class='calc-weeks'>
- <div class='calc-week-input'><label>Minggu 1 (Tgl 1-7) <span class='calc-week-tag high'>ramai</span></label><input type='number' id='calcW1' value='30' oninput='recomputePacing()'></div>
- <div class='calc-week-input'><label>Minggu 2 (Tgl 8-15) <span class='calc-week-tag low'>lesu</span></label><input type='number' id='calcW2' value='20' oninput='recomputePacing()'></div>
- <div class='calc-week-input'><label>Minggu 3 (Tgl 16-24) <span class='calc-week-tag low'>lesu</span></label><input type='number' id='calcW3' value='20' oninput='recomputePacing()'></div>
- <div class='calc-week-input'><label>Minggu 4 (Tgl 25-31) <span class='calc-week-tag high'>ramai</span></label><input type='number' id='calcW4' value='30' oninput='recomputePacing()'></div>
+ <div class='calc-week-input'><label>Minggu 1 (Tgl 1-7) <span class='calc-week-tag high'>ramai</span></label><input type='number' id='calcW1' value='${w.w1}' oninput='recomputePacing()'></div>
+ <div class='calc-week-input'><label>Minggu 2 (Tgl 8-15) <span class='calc-week-tag low'>lesu</span></label><input type='number' id='calcW2' value='${w.w2}' oninput='recomputePacing()'></div>
+ <div class='calc-week-input'><label>Minggu 3 (Tgl 16-24) <span class='calc-week-tag low'>lesu</span></label><input type='number' id='calcW3' value='${w.w3}' oninput='recomputePacing()'></div>
+ <div class='calc-week-input'><label>Minggu 4 (Tgl 25-31) <span class='calc-week-tag high'>ramai</span></label><input type='number' id='calcW4' value='${w.w4}' oninput='recomputePacing()'></div>
  </div>
+ <div class='note' style='margin:2px 0 10px;'>${hist ? `Bobot di atas dihitung dari histori Created WhatsApp segmen ini (${hist.dayCount} hari data, ${nf(hist.grand)} total Created) - bukan asumsi tetap. Tetap bisa diedit manual.` : `Belum cukup histori (min. 14 hari) buat segmen ini - pakai asumsi default 30/20/20/30, sesuaikan manual kalau perlu.`}</div>
  <div class='calc-weight-warn' id='calcWeightWarn'></div>
  <div style='overflow-x:auto;'><table class='calc-table' id='calcResultTable'></table></div>
  <div id='calcInsightBox'></div>
  <p class='note' id='calcMethodNote'></p>
+ <div id='calcStrategyBox' style='margin-top:16px;'></div>
  `;
  recomputePacing();
 }
@@ -2670,6 +2792,14 @@ function onCalcSegChange(){
  document.getElementById("calcBudget").value = Math.round(WA_STATS[seg].lastMonthWaBudget);
  document.getElementById("calcConv").value = (WA_STATS[seg].poolConvRate*100).toFixed(3);
  document.getElementById("calcPoConv").value = (WA_STATS[seg].poCreatedRatio*100).toFixed(2);
+ const hist = FORECAST_SOURCE ? historicalWeekWeights(FORECAST_SOURCE.bySegChDate, seg, "WhatsApp") : null;
+ if (hist) {
+ const w1 = Math.round(hist.w1*100), w2 = Math.round(hist.w2*100), w3 = Math.round(hist.w3*100);
+ document.getElementById("calcW1").value = w1;
+ document.getElementById("calcW2").value = w2;
+ document.getElementById("calcW3").value = w3;
+ document.getElementById("calcW4").value = 100 - w1 - w2 - w3;
+ }
  recomputePacing();
 }
 
@@ -2794,7 +2924,9 @@ function recomputePacing(){
  `<b>Metode:</b> Budget / Harga/pesan = estimasi pesan terkirim. Pesan terkirim x Conversion Rate Created/Sent = estimasi Created. Created x Conversion Rate Paid Out/Created = estimasi Paid Out.<br>
  Kalau kolom [TARGET] Target diubah, <b>Budget WA Bulanan</b> otomatis terisi angka kebutuhannya sebagai starting point - tapi field Budget tetap bisa Anda ubah manual kapan saja; insight di bawah tabel akan otomatis menyesuaikan (gap analysis + saran) berdasarkan budget yang sedang Anda pakai, bukan cuma angka hasil auto-fill.<br>
  Kedua conversion rate di atas dihitung pakai <b>pooled ratio 3 bulan terakhir</b> (Mei-Jul: total Created / total Sent WhatsApp = ${(WA_STATS[seg].poolConvRate*100).toFixed(3)}%; total Paid Out / total Created segmen = ${(WA_STATS[seg].poCreatedRatio*100).toFixed(2)}%) - bukan rata-rata sederhana per bulan, supaya bulan bervolume kecil tidak mendominasi, dan pakai 3 bulan terakhir (bukan Jan-Jul penuh) supaya lebih mencerminkan performa terkini.<br>
- Bobot mingguan (30/20/20/30%) <b>bukan hasil statistik</b> - itu asumsi awal mengikuti pola ramai-lesu-lesu-ramai yang Anda gambarkan, karena sheet ini cuma punya data granularitas bulanan (tidak ada data harian/mingguan asli untuk dihitung polanya). Sesuaikan angkanya begitu ada data riil per minggu.`;
+ Bobot mingguan di atas dihitung dari histori Created harian yang sebenarnya (lihat catatan di atas tabel input minggu) kalau datanya cukup - bukan lagi asumsi tetap 30/20/20/30.`;
+
+ renderPacingStrategy(seg, weeks, totalW, budget, targetCreatedInput, targetPoInput, totalCreated, totalPo);
 }
 
 // ===================== MAIN =====================
