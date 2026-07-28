@@ -700,6 +700,10 @@ function parseLowerFunnelLog(rows){
  let maxDate = null; // freshest date found anywhere in the log - the "as of" reference point for forecasting
  const zeroStage = () => ({ created:0, afterFF:0, eligible:0, accepted:0, paidOut:0, paidOutAmount:0, rows:0 });
  const unrecognizedSeg = {};
+ const unrecognizedChannel = {}; // Channel values that don't match WhatsApp/Email/Push Notification/Sales AI -
+ // rows with these still count toward Created/Paid Out totals (KPI cards etc.), but can't be filed
+ // into a per-channel bucket, so they're invisible to Forecast/channel-breakdown features. Surfaced
+ // in the debug panel so this doesn't fail silently.
  // "Month" is optional - derive it from "Created Date" per-row if the column isn't there.
  const monthColMissing = col.month == null;
  for (let i = dataStart; i < rows.length; i++) {
@@ -707,9 +711,11 @@ function parseLowerFunnelLog(rows){
  if (!rawSeg) continue;
  const seg = RAW_SEG_TO_DASH_SEG[rawSeg];
  if (!seg) { unrecognizedSeg[rawSeg] = (unrecognizedSeg[rawSeg]||0) + 1; continue; }
- const dateStr = cellAtCol(rows, i, col.date);
+ const rawDateCell = cellAtCol(rows, i, col.date);
+ const dateMatch = rawDateCell.match(/^(\d{4}-\d{2}-\d{2})/); // tolerate trailing time/whitespace, e.g. "2026-07-15 00:00:00"
+ const dateStr = dateMatch ? dateMatch[1] : null;
  let month = monthColMissing ? null : parseInt(cellAtCol(rows, i, col.month), 10);
- if ((!month || month < 1 || month > 12) && /^\d{4}-\d{2}-\d{2}/.test(dateStr)) month = parseInt(dateStr.slice(5,7), 10);
+ if ((!month || month < 1 || month > 12) && dateStr) month = parseInt(dateStr.slice(5,7), 10);
  if (!month || month < 1 || month > 12) continue;
  const v = {
  created: valAtCol(rows, i, col.created) || 0,
@@ -725,7 +731,7 @@ function parseLowerFunnelLog(rows){
  bySeg[seg][month].rows++;
  const rawCh = cellAtCol(rows, i, col.channel);
  const ch = RAW_CH_TO_DASH_CH[rawCh];
- if (ch) {
+ if (!ch) { if (rawCh) unrecognizedChannel[rawCh] = (unrecognizedChannel[rawCh]||0) + 1; continue; }
  bySegCh[seg] = bySegCh[seg] || {};
  bySegCh[seg][ch] = bySegCh[seg][ch] || {};
  bySegCh[seg][ch][month] = bySegCh[seg][ch][month] || { created:0, paidOut:0, paidOutAmount:0 };
@@ -733,7 +739,7 @@ function parseLowerFunnelLog(rows){
  bySegCh[seg][ch][month].paidOut += v.paidOut;
  bySegCh[seg][ch][month].paidOutAmount += v.paidOutAmount;
 
- if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+ if (dateStr) {
  bySegChDate[seg] = bySegChDate[seg] || {};
  bySegChDate[seg][ch] = bySegChDate[seg][ch] || {};
  bySegChDate[seg][ch][dateStr] = bySegChDate[seg][ch][dateStr] || { created:0, paidOut:0, paidOutAmount:0 };
@@ -743,8 +749,7 @@ function parseLowerFunnelLog(rows){
  if (!maxDate || dateStr > maxDate) maxDate = dateStr;
  }
  }
- }
- return { bySeg, bySegCh, bySegChDate, maxDate, unrecognizedSeg, missingColumns: missing, totalRowsRead: rows.length - dataStart };
+ return { bySeg, bySegCh, bySegChDate, maxDate, unrecognizedSeg, unrecognizedChannel, missingColumns: missing, totalRowsRead: rows.length - dataStart };
 }
 
 // ---- FORECAST: linear regression on the current (in-progress) month's daily cumulative totals,
@@ -929,7 +934,7 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  const SEGS = ALL_SEGMENTS;
  const upperIdx = buildUpperIndex(upperRows);
  const costIdx = buildCostIndex(costRows);
- const { bySeg: lowerAgg, bySegCh: lowerAggCh, bySegChDate, maxDate, unrecognizedSeg, missingColumns } = parseLowerFunnelLog(lowerRows);
+ const { bySeg: lowerAgg, bySegCh: lowerAggCh, bySegChDate, maxDate, unrecognizedSeg, unrecognizedChannel, missingColumns } = parseLowerFunnelLog(lowerRows);
  const targetAgg = parseTargetLog(targetRows);
 
  const trend = {}, cost = {}, cpa = {}, poAmountCost = {}, budgetAug = {};
@@ -1062,7 +1067,7 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  return { trend, cost, cpa, poAmountCost, channel, channelEngage, budgetAug, channelDetail, costByChannel, augCost, waStats,
  forecastSource: { bySegChDate, maxDate },
  targetAgg,
- debug: { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, missingColumns, upperIdx, costIdx } };
+ debug: { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, upperIdx, costIdx } };
 }
 
 // ===================== DEBUG PANEL (self-diagnosis, no DevTools needed) =====================
@@ -1079,11 +1084,16 @@ function renderDebugPanel(){
  const el = document.getElementById("debugPanelBody");
  if (!el) return;
  if (!LAST_DEBUG) { el.innerHTML = `<p class='note'>Belum ada data live (masih pakai fallback/cache) - debug panel hanya aktif setelah fetch live berhasil.</p>`; return; }
- const { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, missingColumns, upperIdx, costIdx } = LAST_DEBUG;
+ const { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, upperIdx, costIdx } = LAST_DEBUG;
  let html = "";
 
  if (missingColumns && missingColumns.length) {
  html += `<div class='balert-msg ${missingColumns.includes("Segment")||missingColumns.includes("Created Apps")?'bad':'warn'}' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[WARNING]</span><div><b>Kolom tidak ketemu di header Lower Funnel:</b> ${missingColumns.join(', ')} - kalau ini kolom penting (Segment, Created Apps, dll), datanya nggak akan kehitung. "Month" boleh hilang (otomatis diambil dari Created Date), yang lain sebaiknya dikembalikan namanya persis seperti semula.</div></div>`;
+ }
+
+ const unrecChKeys = Object.keys(unrecognizedChannel || {});
+ if (unrecChKeys.length) {
+ html += `<div class='balert-msg bad' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[ALERT]</span><div><b>Nilai Channel tidak dikenali di Lower Funnel log:</b> ${unrecChKeys.map(k=>`"${k}" (${unrecognizedChannel[k]} baris)`).join(', ')} - kode cuma kenal persis "WhatsApp", "Email", "Push Notification", "Sales AI". Baris dengan channel di luar itu TETAP kehitung di KPI/Trend (level segmen), tapi HILANG dari Forecast &amp; breakdown per-channel (yang butuh channel dikenali). Kalau ini yang bikin Forecast kosong, samain dulu ejaan di kolom Channel ke salah satu dari 4 nama itu.</div></div>`;
  }
 
  const unrecKeys = Object.keys(unrecognizedSeg || {});
