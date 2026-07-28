@@ -1167,6 +1167,8 @@ async function loadLiveData(){
  AUG_COST = AUG_COST_FALLBACK; WA_STATS = WA_STATS_FALLBACK;
  FORECAST_SOURCE = null;
  TARGET_AGG = null;
+ LAST_DEBUG = null;
+ renderDebugPanel();
  statusEl.innerHTML = `[CACHE] <b>Data cache</b> (snapshot 23 Jul 2026) - live fetch gagal. Pastikan Google Sheet sudah di-share 'Anyone with link can view'. <span style='color:var(--bad);'>(${err.message})</span>`;
  onFilterChange();
  } finally {
