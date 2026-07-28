@@ -704,6 +704,8 @@ function parseLowerFunnelLog(rows){
  // rows with these still count toward Created/Paid Out totals (KPI cards etc.), but can't be filed
  // into a per-channel bucket, so they're invisible to Forecast/channel-breakdown features. Surfaced
  // in the debug panel so this doesn't fail silently.
+ let dateParseFailCount = 0;
+ const dateParseFailSamples = []; // a few raw values that failed, to show in the debug panel
  // "Month" is optional - derive it from "Created Date" per-row if the column isn't there.
  const monthColMissing = col.month == null;
  for (let i = dataStart; i < rows.length; i++) {
@@ -714,6 +716,7 @@ function parseLowerFunnelLog(rows){
  const rawDateCell = cellAtCol(rows, i, col.date);
  const dateMatch = rawDateCell.match(/^(\d{4}-\d{2}-\d{2})/); // tolerate trailing time/whitespace, e.g. "2026-07-15 00:00:00"
  const dateStr = dateMatch ? dateMatch[1] : null;
+ if (!dateStr && rawDateCell) { dateParseFailCount++; if (dateParseFailSamples.length < 5) dateParseFailSamples.push(rawDateCell); }
  let month = monthColMissing ? null : parseInt(cellAtCol(rows, i, col.month), 10);
  if ((!month || month < 1 || month > 12) && dateStr) month = parseInt(dateStr.slice(5,7), 10);
  if (!month || month < 1 || month > 12) continue;
@@ -749,7 +752,7 @@ function parseLowerFunnelLog(rows){
  if (!maxDate || dateStr > maxDate) maxDate = dateStr;
  }
  }
- return { bySeg, bySegCh, bySegChDate, maxDate, unrecognizedSeg, unrecognizedChannel, missingColumns: missing, totalRowsRead: rows.length - dataStart };
+ return { bySeg, bySegCh, bySegChDate, maxDate, unrecognizedSeg, unrecognizedChannel, missingColumns: missing, totalRowsRead: rows.length - dataStart, dateParseFailCount, dateParseFailSamples };
 }
 
 // ---- FORECAST: linear regression on the current (in-progress) month's daily cumulative totals,
@@ -934,7 +937,7 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  const SEGS = ALL_SEGMENTS;
  const upperIdx = buildUpperIndex(upperRows);
  const costIdx = buildCostIndex(costRows);
- const { bySeg: lowerAgg, bySegCh: lowerAggCh, bySegChDate, maxDate, unrecognizedSeg, unrecognizedChannel, missingColumns } = parseLowerFunnelLog(lowerRows);
+ const { bySeg: lowerAgg, bySegCh: lowerAggCh, bySegChDate, maxDate, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples } = parseLowerFunnelLog(lowerRows);
  const targetAgg = parseTargetLog(targetRows);
 
  const trend = {}, cost = {}, cpa = {}, poAmountCost = {}, budgetAug = {};
@@ -1067,7 +1070,7 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  return { trend, cost, cpa, poAmountCost, channel, channelEngage, budgetAug, channelDetail, costByChannel, augCost, waStats,
  forecastSource: { bySegChDate, maxDate },
  targetAgg,
- debug: { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, upperIdx, costIdx } };
+ debug: { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, upperIdx, costIdx } };
 }
 
 // ===================== DEBUG PANEL (self-diagnosis, no DevTools needed) =====================
@@ -1084,8 +1087,12 @@ function renderDebugPanel(){
  const el = document.getElementById("debugPanelBody");
  if (!el) return;
  if (!LAST_DEBUG) { el.innerHTML = `<p class='note'>Belum ada data live (masih pakai fallback/cache) - debug panel hanya aktif setelah fetch live berhasil.</p>`; return; }
- const { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, upperIdx, costIdx } = LAST_DEBUG;
+ const { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, upperIdx, costIdx } = LAST_DEBUG;
  let html = "";
+
+ if (dateParseFailCount > 0) {
+ html += `<div class='balert-msg bad' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[ALERT]</span><div><b>${nf(dateParseFailCount)} baris gagal dibaca tanggalnya di kolom Created Date</b> (harus format YYYY-MM-DD, misal 2026-07-27) - contoh nilai mentah yang gagal: ${dateParseFailSamples.map(s=>`"${s}"`).join(', ')}. Baris ini TETAP kehitung di KPI/Trend (level bulan), tapi HILANG TOTAL dari Forecast &amp; Rentang Tanggal Custom (yang butuh tanggal harian per baris). Kalau ini jumlahnya besar, itu penjelasan kenapa Forecast kosong - cek format kolom Created Date di sheet (mungkin ke-set sebagai format tanggal lokal Indonesia seperti DD/MM/YYYY, bukan teks YYYY-MM-DD).</div></div>`;
+ }
 
  if (missingColumns && missingColumns.length) {
  html += `<div class='balert-msg ${missingColumns.includes("Segment")||missingColumns.includes("Created Apps")?'bad':'warn'}' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[WARNING]</span><div><b>Kolom tidak ketemu di header Lower Funnel:</b> ${missingColumns.join(', ')} - kalau ini kolom penting (Segment, Created Apps, dll), datanya nggak akan kehitung. "Month" boleh hilang (otomatis diambil dari Created Date), yang lain sebaiknya dikembalikan namanya persis seperti semula.</div></div>`;
