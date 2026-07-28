@@ -658,16 +658,41 @@ function costVal(costRows, costIdx, seg, type, month){
  return valAt(costRows, row0, col);
 }
 
-// ---- LOWER FUNNEL: now a raw per-lead transaction log (previously a pivot/rekap table).
-// Columns: No | Created Date | Segment | Geo | Channel Attribute Logic | Created Apps |
-// After First Filter | Eligible | Accepted Apps | Paid Out | Paid Out Amount | Month
-const LOWER_LOG_COL = { date:2, segment:3, channel:5, created:6, afterFF:7, eligible:8, accepted:9, paidOut:10, paidOutAmount:11, month:12 };
+// ---- LOWER FUNNEL: a raw per-lead transaction log. Expected columns (any order, matched by
+// header text so adding/removing/reordering columns doesn't silently break parsing): No | Created
+// Date | Segment | Geo | Channel Attribute Logic | Created Apps | After First Filter | Eligible |
+// Accepted Apps | Paid Out | Paid Out Amount | Month. If "Month" itself is missing, it's derived
+// from "Created Date" instead (which is required) - so removing just the Month column is safe.
 const RAW_SEG_TO_DASH_SEG = { "New":"New", "Repeat":"Repeat", "TopUp":"TopUp", "LMT":"LMT", "SL":"SL" };
 const RAW_CH_TO_DASH_CH = { "WhatsApp":"WhatsApp", "Email":"Email", "Push Notification":"Push", "Sales AI":"SalesAI" };
 
-function parseLowerFunnelLog(rows){
+// Finds the header row (anchored on a column literally titled "No") and resolves each requested
+// column key to its 1-indexed position by matching header text (case-insensitive, trimmed).
+// Returns { headerRow, dataStart, col: {key: colIndexOrNull}, missing: [labels not found] }.
+function resolveColumnsByHeader(rows, labelMap){
  const headerRow = findLabelRow(rows, "No", 0, rows.length);
  const dataStart = headerRow >= 0 ? headerRow + 1 : 0;
+ const col = {}, missing = [];
+ if (headerRow < 0) {
+ Object.keys(labelMap).forEach(k => col[k] = null);
+ return { headerRow, dataStart, col, missing: Object.values(labelMap) };
+ }
+ const hdrRow = rows[headerRow] || [];
+ Object.keys(labelMap).forEach(key => {
+ const label = labelMap[key].toLowerCase();
+ let idx = -1;
+ for (let c = 0; c < hdrRow.length; c++) { if (String(hdrRow[c]||"").trim().toLowerCase() === label) { idx = c; break; } }
+ if (idx >= 0) col[key] = idx + 1; else { col[key] = null; missing.push(labelMap[key]); }
+ });
+ return { headerRow, dataStart, col, missing };
+}
+function cellAtCol(rows, row0, col1){ return col1 == null ? "" : cellText(rows, row0, col1); }
+function valAtCol(rows, row0, col1){ return col1 == null ? null : valAt(rows, row0, col1); }
+
+const LOWER_LOG_LABELS = { date:"Created Date", segment:"Segment", channel:"Channel Attribute Logic", created:"Created Apps", afterFF:"After First Filter", eligible:"Eligible", accepted:"Accepted Apps", paidOut:"Paid Out", paidOutAmount:"Paid Out Amount", month:"Month" };
+
+function parseLowerFunnelLog(rows){
+ const { dataStart, col, missing } = resolveColumnsByHeader(rows, LOWER_LOG_LABELS);
  const bySeg = {}, bySegCh = {};
  // bySegChDate[seg][ch]["YYYY-MM-DD"] = {created,paidOut,paidOutAmount} - powers the forecast (needs
  // real calendar dates, not just the Month column, to know how many days have actually elapsed).
@@ -675,26 +700,30 @@ function parseLowerFunnelLog(rows){
  let maxDate = null; // freshest date found anywhere in the log - the "as of" reference point for forecasting
  const zeroStage = () => ({ created:0, afterFF:0, eligible:0, accepted:0, paidOut:0, paidOutAmount:0, rows:0 });
  const unrecognizedSeg = {};
+ // "Month" is optional - derive it from "Created Date" per-row if the column isn't there.
+ const monthColMissing = col.month == null;
  for (let i = dataStart; i < rows.length; i++) {
- const rawSeg = cellText(rows, i, LOWER_LOG_COL.segment);
+ const rawSeg = cellAtCol(rows, i, col.segment);
  if (!rawSeg) continue;
  const seg = RAW_SEG_TO_DASH_SEG[rawSeg];
  if (!seg) { unrecognizedSeg[rawSeg] = (unrecognizedSeg[rawSeg]||0) + 1; continue; }
- const month = parseInt(cellText(rows, i, LOWER_LOG_COL.month), 10);
+ const dateStr = cellAtCol(rows, i, col.date);
+ let month = monthColMissing ? null : parseInt(cellAtCol(rows, i, col.month), 10);
+ if ((!month || month < 1 || month > 12) && /^\d{4}-\d{2}-\d{2}/.test(dateStr)) month = parseInt(dateStr.slice(5,7), 10);
  if (!month || month < 1 || month > 12) continue;
  const v = {
- created: valAt(rows, i, LOWER_LOG_COL.created) || 0,
- afterFF: valAt(rows, i, LOWER_LOG_COL.afterFF) || 0,
- eligible: valAt(rows, i, LOWER_LOG_COL.eligible) || 0,
- accepted: valAt(rows, i, LOWER_LOG_COL.accepted) || 0,
- paidOut: valAt(rows, i, LOWER_LOG_COL.paidOut) || 0,
- paidOutAmount: valAt(rows, i, LOWER_LOG_COL.paidOutAmount) || 0,
+ created: valAtCol(rows, i, col.created) || 0,
+ afterFF: valAtCol(rows, i, col.afterFF) || 0,
+ eligible: valAtCol(rows, i, col.eligible) || 0,
+ accepted: valAtCol(rows, i, col.accepted) || 0,
+ paidOut: valAtCol(rows, i, col.paidOut) || 0,
+ paidOutAmount: valAtCol(rows, i, col.paidOutAmount) || 0,
  };
  bySeg[seg] = bySeg[seg] || {};
  bySeg[seg][month] = bySeg[seg][month] || zeroStage();
  Object.keys(v).forEach(k => bySeg[seg][month][k] += v[k]);
  bySeg[seg][month].rows++;
- const rawCh = cellText(rows, i, LOWER_LOG_COL.channel);
+ const rawCh = cellAtCol(rows, i, col.channel);
  const ch = RAW_CH_TO_DASH_CH[rawCh];
  if (ch) {
  bySegCh[seg] = bySegCh[seg] || {};
@@ -704,7 +733,6 @@ function parseLowerFunnelLog(rows){
  bySegCh[seg][ch][month].paidOut += v.paidOut;
  bySegCh[seg][ch][month].paidOutAmount += v.paidOutAmount;
 
- const dateStr = cellText(rows, i, LOWER_LOG_COL.date); // expected "YYYY-MM-DD"
  if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
  bySegChDate[seg] = bySegChDate[seg] || {};
  bySegChDate[seg][ch] = bySegChDate[seg][ch] || {};
@@ -716,7 +744,7 @@ function parseLowerFunnelLog(rows){
  }
  }
  }
- return { bySeg, bySegCh, bySegChDate, maxDate, unrecognizedSeg, totalRowsRead: rows.length - dataStart };
+ return { bySeg, bySegCh, bySegChDate, maxDate, unrecognizedSeg, missingColumns: missing, totalRowsRead: rows.length - dataStart };
 }
 
 // ---- FORECAST: linear regression on the current (in-progress) month's daily cumulative totals,
@@ -798,24 +826,24 @@ function allDatesInData(bySegChDate, segArr, chArr){
  return Array.from(set).sort();
 }
 
-// ---- TARGET: raw log. Columns: No | Segmen | Channel | Month | Funnel | Target
-const TARGET_LOG_COL = { segment:2, month:4, funnel:5, target:6 };
+// ---- TARGET: raw log. Expected columns (matched by header text): No | Segmen | Channel | Month |
+// Funnel | Target - any order, robust to columns being added/removed/reordered.
+const TARGET_LOG_LABELS = { segment:"Segmen", channel:"Channel", month:"Month", funnel:"Funnel", target:"Target" };
 const TARGET_MONTH_TO_NUM = { "Jan 26":1,"Feb 26":2,"Mar 26":3,"Apr 26":4,"May 26":5,"Jun 26":6,"Jul 26":7,"Aug 26":8,"Sep 26":9,"Oct 26":10,"Nov 26":11,"Dec 26":12 };
 const TARGET_FUNNEL_TO_KEY = { "Created":"created", "After FF":"afterFF", "Eligible":"eligible", "Accepted":"accepted", "Paid out":"paidOut", "Paid out Amount":"paidOutAmount" };
 function parseTargetLog(rows){
- const headerRow = findLabelRow(rows, "No", 0, rows.length);
- const dataStart = headerRow >= 0 ? headerRow + 1 : 0;
+ const { dataStart, col, missing } = resolveColumnsByHeader(rows, TARGET_LOG_LABELS);
  const bySeg = {};
  for (let i = dataStart; i < rows.length; i++) {
- const rawSeg = cellText(rows, i, TARGET_LOG_COL.segment);
+ const rawSeg = cellAtCol(rows, i, col.segment);
  if (!rawSeg) continue;
  const seg = RAW_SEG_TO_DASH_SEG[rawSeg];
  if (!seg) continue;
- const monthNum = TARGET_MONTH_TO_NUM[cellText(rows, i, TARGET_LOG_COL.month)];
+ const monthNum = TARGET_MONTH_TO_NUM[cellAtCol(rows, i, col.month)];
  if (!monthNum) continue;
- const metricKey = TARGET_FUNNEL_TO_KEY[cellText(rows, i, TARGET_LOG_COL.funnel)];
+ const metricKey = TARGET_FUNNEL_TO_KEY[cellAtCol(rows, i, col.funnel)];
  if (!metricKey) continue;
- const val = valAt(rows, i, TARGET_LOG_COL.target) || 0;
+ const val = valAtCol(rows, i, col.target) || 0;
  bySeg[seg] = bySeg[seg] || {};
  bySeg[seg][monthNum] = bySeg[seg][monthNum] || {};
  bySeg[seg][monthNum][metricKey] = (bySeg[seg][monthNum][metricKey] || 0) + val;
@@ -890,7 +918,7 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  const SEGS = ALL_SEGMENTS;
  const upperIdx = buildUpperIndex(upperRows);
  const costIdx = buildCostIndex(costRows);
- const { bySeg: lowerAgg, bySegCh: lowerAggCh, bySegChDate, maxDate, unrecognizedSeg } = parseLowerFunnelLog(lowerRows);
+ const { bySeg: lowerAgg, bySegCh: lowerAggCh, bySegChDate, maxDate, unrecognizedSeg, missingColumns } = parseLowerFunnelLog(lowerRows);
  const targetAgg = parseTargetLog(targetRows);
 
  const trend = {}, cost = {}, cpa = {}, poAmountCost = {}, budgetAug = {};
@@ -1023,7 +1051,7 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  return { trend, cost, cpa, poAmountCost, channel, channelEngage, budgetAug, channelDetail, costByChannel, augCost, waStats,
  forecastSource: { bySegChDate, maxDate },
  targetAgg,
- debug: { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, upperIdx, costIdx } };
+ debug: { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, missingColumns, upperIdx, costIdx } };
 }
 
 // ===================== DEBUG PANEL (self-diagnosis, no DevTools needed) =====================
@@ -1040,8 +1068,12 @@ function renderDebugPanel(){
  const el = document.getElementById("debugPanelBody");
  if (!el) return;
  if (!LAST_DEBUG) { el.innerHTML = `<p class='note'>Belum ada data live (masih pakai fallback/cache) - debug panel hanya aktif setelah fetch live berhasil.</p>`; return; }
- const { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, upperIdx, costIdx } = LAST_DEBUG;
+ const { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, missingColumns, upperIdx, costIdx } = LAST_DEBUG;
  let html = "";
+
+ if (missingColumns && missingColumns.length) {
+ html += `<div class='balert-msg ${missingColumns.includes("Segment")||missingColumns.includes("Created Apps")?'bad':'warn'}' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[WARNING]</span><div><b>Kolom tidak ketemu di header Lower Funnel:</b> ${missingColumns.join(', ')} - kalau ini kolom penting (Segment, Created Apps, dll), datanya nggak akan kehitung. "Month" boleh hilang (otomatis diambil dari Created Date), yang lain sebaiknya dikembalikan namanya persis seperti semula.</div></div>`;
+ }
 
  const unrecKeys = Object.keys(unrecognizedSeg || {});
  if (unrecKeys.length) {
