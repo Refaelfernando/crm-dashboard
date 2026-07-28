@@ -714,8 +714,8 @@ function parseLowerFunnelLog(rows){
  const seg = RAW_SEG_TO_DASH_SEG[rawSeg];
  if (!seg) { unrecognizedSeg[rawSeg] = (unrecognizedSeg[rawSeg]||0) + 1; continue; }
  const rawDateCell = cellAtCol(rows, i, col.date);
- const dateMatch = rawDateCell.match(/^(\d{4}-\d{2}-\d{2})/); // tolerate trailing time/whitespace, e.g. "2026-07-15 00:00:00"
- const dateStr = dateMatch ? dateMatch[1] : null;
+ const dateMatch = rawDateCell.match(/^(\d{4})[-\/](\d{2})[-\/](\d{2})/); // accepts "2026-07-27" or "2026/07/27", tolerates trailing time/whitespace
+ const dateStr = dateMatch ? `${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}` : null; // normalized to YYYY-MM-DD regardless of source separator, since this is used as a dict key and compared lexicographically for maxDate
  if (!dateStr && rawDateCell) { dateParseFailCount++; if (dateParseFailSamples.length < 5) dateParseFailSamples.push(rawDateCell); }
  let month = monthColMissing ? null : parseInt(cellAtCol(rows, i, col.month), 10);
  if ((!month || month < 1 || month > 12) && dateStr) month = parseInt(dateStr.slice(5,7), 10);
@@ -1674,10 +1674,10 @@ function renderKPIs(f){
  cls: (hasPrev && poPrevValid) ? (poM>=poPrev?'pos':'neg') : 'neu' },
  { l:`CPA - ${monthName}${chLabel}`, v: rp(cpaM),
  s: (hasPrev && cpaPrev ? `${cpaM>=cpaPrev?'+':''}${pct(cpaM/cpaPrev-1)} vs ${prevName}` : `Data awal periode`),
- cls: (hasPrev && cpaPrev) ? (cpaM<=cpaPrev?'pos':'neg') : 'neu' },
+ cls: (hasPrev && cpaPrev) ? (cpaM>=cpaPrev?'pos':'neg') : 'neu' },
  { l:`Total Cost - ${monthName}${chLabel}`, v: rpJt(costM),
  s: hasPrev ? `${costM>=costPrev?'+':''}${pct(costM/costPrev-1)} vs ${prevName}` : `Data awal periode`,
- cls: hasPrev ? (costM<=costPrev?'pos':'neg') : 'neu' },
+ cls: hasPrev ? (costM>=costPrev?'pos':'neg') : 'neu' },
  ];
  document.getElementById("kpiRow").innerHTML = cards.map(c => `
  <div class='kpi'>
@@ -2356,7 +2356,7 @@ function renderCostByChannelTable(f){
  if (hasPrev) {
  if (prev === 0 && cur === 0) deltaHtml = `<div class='s neu' style='font-size:10.5px;'>tetap Rp0</div>`;
  else if (prev === 0) deltaHtml = `<div class='s neg' style='font-size:10.5px;'>baru mulai</div>`;
- else { const d=(cur-prev)/prev; deltaHtml = `<div class='s ${d<=0?'pos':'neg'}' style='font-size:10.5px;'>${d>=0?'+':''}${Math.round(d*100)}% vs ${MONTHS[m-1]}</div>`; }
+ else { const d=(cur-prev)/prev; deltaHtml = `<div class='s ${d>=0?'pos':'neg'}' style='font-size:10.5px;'>${d>=0?'+':''}${Math.round(d*100)}% vs ${MONTHS[m-1]}</div>`; }
  }
  const widthPct = maxCost ? Math.max((cur/maxCost*100), cur>0?2:0) : 0;
  return `
@@ -2482,7 +2482,7 @@ function renderChannelTable(f){
  }
  rows.forEach(r => {
  const [label, cls] = recLabel[r.rec];
- const deltaColor = r.delta.startsWith("+") ? "neg" : (r.delta.startsWith("-") ? "pos" : "");
+ const deltaColor = r.delta.startsWith("+") ? "pos" : (r.delta.startsWith("-") ? "neg" : "");
  html += `<tr>
  <td><b style='color:${SEG_COLORS[r.seg]}'>${r.seg}</b></td>
  <td>${r.ch}</td>
@@ -2511,7 +2511,7 @@ function renderCostRatioTable(f){
  if (!d) { html += `<tr><td><b style='color:${SEG_COLORS[seg]}'>${seg}</b></td><td colspan='6' style='color:var(--muted);'>Data tidak tersedia</td></tr>`; return; }
  const ratioJun = d.junCost / d.junAmt;
  const ratioJul = d.julCost != null ? d.julCost / d.julAmt : null;
- const cls = (ratioJul!=null && ratioJul > ratioJun) ? "neg" : "pos";
+ const cls = (ratioJul!=null && ratioJul > ratioJun) ? "pos" : "neg";
  html += `<tr>
  <td><b style='color:${SEG_COLORS[seg]}'>${seg}</b></td>
  <td class='num'>${rp(d.junAmt)}</td>
