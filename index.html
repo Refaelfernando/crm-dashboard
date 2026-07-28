@@ -781,6 +781,17 @@ function buildDailySeries(bySegChDate, segArr, chArr, year, month, elapsedDay, m
  }
  return series;
 }
+// The freshest date within just the selected segments/channels - NOT the whole dataset's max date.
+// Using a global max date here would let one stray row in an unrelated segment/channel (or a typo'd
+// date) silently hijack the "as of" reference for every forecast, regardless of filter.
+function maxDateForFilter(bySegChDate, segArr, chArr){
+ let max = null;
+ segArr.forEach(seg => chArr.forEach(ch => {
+ const chData = bySegChDate[seg] && bySegChDate[seg][ch];
+ if (chData) Object.keys(chData).forEach(d => { if (!max || d > max) max = d; });
+ }));
+ return max;
+}
 function computeForecast(bySegChDate, maxDate, segArr, chArr){
  if (!maxDate) return null;
  const [y, m, d] = maxDate.split('-').map(Number);
@@ -1327,12 +1338,16 @@ function renderForecast(f){
  document.getElementById("forecastFIR").innerHTML = "";
  return;
  }
- const fc = computeForecast(FORECAST_SOURCE.bySegChDate, FORECAST_SOURCE.maxDate, f.seg, f.ch);
+ const filteredMaxDate = maxDateForFilter(FORECAST_SOURCE.bySegChDate, f.seg, f.ch);
+ const fc = computeForecast(FORECAST_SOURCE.bySegChDate, filteredMaxDate, f.seg, f.ch);
  if (!fc) { box.innerHTML = `<p class='note'>Tidak ada data untuk kombinasi filter ini.</p>`; document.getElementById("forecastFIR").innerHTML = ""; return; }
 
  titleEl.textContent = ` Forecast Akhir ${fc.monthLabel} (data s.d. tanggal ${fc.asOfDay})`;
- document.getElementById("forecastCap").textContent =
- `Regresi linear atas total harian ${fc.monthLabel} tanggal 1-${fc.asOfDay} (dari ${fc.asOfDay} titik data), diproyeksikan ke tanggal ${fc.daysInMonth}${segCapText(f.seg)}${chCapText(f.ch)}`;
+ let capText = `Regresi linear atas total harian ${fc.monthLabel} tanggal 1-${fc.asOfDay} (dari ${fc.asOfDay} titik data), diproyeksikan ke tanggal ${fc.daysInMonth}${segCapText(f.seg)}${chCapText(f.ch)}`;
+ if (FORECAST_SOURCE.maxDate && FORECAST_SOURCE.maxDate !== filteredMaxDate) {
+ capText += ` - [PERHATIAN] tanggal terbaru di kombinasi filter ini (${filteredMaxDate.split('-').reverse().join('/')}) beda dari tanggal terbaru di seluruh sheet (${FORECAST_SOURCE.maxDate.split('-').reverse().join('/')}) - kalau selisihnya jauh/aneh (misal loncat ke bulan lain), kemungkinan ada baris dengan tanggal salah ketik di segmen/channel lain.`;
+ }
+ document.getElementById("forecastCap").textContent = capText;
 
  const cards = [
  { l: "Created - MTD Aktual", v: nf(fc.created.mtdActual), sub: `Forecast s.d. akhir bulan: <b>${nf(fc.created.forecast)}</b>` },
