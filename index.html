@@ -584,47 +584,9 @@ function findLabelRow(rows, label, fromRow0, toRow0){
  return -1;
 }
 
-const UPPER_SEG_LABEL = { "New": "New", "Repeat+TopUp": "Repeat + Top Up", "LMT": "Repeat LMT" };
-const UPPER_CH_LABELS = ["Whatsapp", "Email", "Push Notification"];
-const UPPER_CH_KEY = { "Whatsapp": "WhatsApp", "Email": "Email", "Push Notification": "Push" };
-
 // Upper Funnel & Cost Detail masih pakai format pivot lama, dan cuma punya 3 blok segmen:
 // New / gabungan Repeat+TopUp / LMT - lihat COST_SOURCE_SEG di atas untuk pemetaannya.
 const COST_SEG_LABEL = { "New": "New", "Repeat+TopUp": "Repeat + Top Up", "LMT": "LMT" };
-
-function buildUpperIndex(rows){
- const segKeys = Object.keys(UPPER_SEG_LABEL);
- const segStart = {};
- segKeys.forEach(k => { segStart[k] = findLabelRow(rows, UPPER_SEG_LABEL[k], 0, rows.length); });
- const idx = {};
- segKeys.forEach(segKey => {
- const start = segStart[segKey];
- if (start < 0) { idx[segKey] = null; return; }
- let end = rows.length;
- segKeys.forEach(o => { const s = segStart[o]; if (o !== segKey && s > start && s < end) end = s; });
- idx[segKey] = {};
- UPPER_CH_LABELS.forEach(chLabel => {
- const chStart = findLabelRow(rows, chLabel, start, end);
- if (chStart < 0) { idx[segKey][UPPER_CH_KEY[chLabel]] = null; return; }
- let chEnd = end;
- UPPER_CH_LABELS.forEach(o => { if (o !== chLabel) { const s = findLabelRow(rows, o, chStart + 1, end); if (s >= 0 && s < chEnd) chEnd = s; } });
- const funnelHdr = findLabelRow(rows, "Funnel", chStart, chEnd);
- const from = funnelHdr >= 0 ? funnelHdr + 1 : chStart;
- let clickRow = findLabelRow(rows, "Click", from, chEnd);
- if (clickRow < 0) clickRow = findLabelRow(rows, "Click / Open", from, chEnd);
- let openRow = findLabelRow(rows, "Open / Read", from, chEnd);
- if (openRow < 0) openRow = findLabelRow(rows, "Open", from, chEnd);
- idx[segKey][UPPER_CH_KEY[chLabel]] = {
- sent: findLabelRow(rows, "Sent", from, chEnd),
- delivered: findLabelRow(rows, "Delivered", from, chEnd),
- click: clickRow,
- open: openRow,
- created: findLabelRow(rows, "Created", from, chEnd),
- };
- });
- });
- return idx;
-}
 
 function buildCostIndex(rows){
  const idx = {};
@@ -641,14 +603,6 @@ function buildCostIndex(rows){
  return idx;
 }
 
-function upperVal(upperRows, upperIdx, seg, ch, metric, month){
- const segIdx = upperIdx[seg];
- if (!segIdx || !segIdx[ch]) return null;
- const row0 = segIdx[ch][metric];
- if (row0 == null || row0 < 0) return null;
- const col = 1 + month;
- return valAt(upperRows, row0, col);
-}
 function costVal(costRows, costIdx, seg, type, month){
  const segIdx = costIdx[seg];
  if (!segIdx) return null;
@@ -753,6 +707,60 @@ function parseLowerFunnelLog(rows){
  }
  }
  return { bySeg, bySegCh, bySegChDate, maxDate, unrecognizedSeg, unrecognizedChannel, missingColumns: missing, totalRowsRead: rows.length - dataStart, dateParseFailCount, dateParseFailSamples };
+}
+
+// ---- UPPER FUNNEL: as of the latest sheet update this is now ALSO a raw per-send-date log
+// (previously it was a monthly pivot table with Sent/Delivered/Read/Click as row labels and
+// Jan26..Dec26 as columns, split into Whatsapp/Email/Push Notification blocks per segment).
+// New columns: No | Sent Date | Segmen | Segment 1 | Sent | Delivered | Read | Click |
+// Delivery Rate | Read Rate | Click Rate | Month.
+//
+// IMPORTANT LIMITATION: the new log has NO channel column at all - "Segmen"/"Segment 1" only
+// identify the audience segment, not WhatsApp/Email/Push. That per-channel breakdown that used
+// to come from this sheet (Sent/Delivered/Click by channel) is therefore NOT available anymore
+// from Upper Funnel - only segment-level totals (all channels combined). If channel-level
+// Sent/Delivered/Click tracking is still needed, a Channel column needs to be added back to this
+// sheet - until then, per-channel numbers below are deliberately left null rather than guessed.
+//
+// "Segment 1" (already-cleaned segment) is trusted over the raw "Segmen" audience-tag column, and
+// mapped to the dashboard's 5 segments. "Month" (explicit, already-validated column) is trusted
+// over "Sent Date" for bucketing - "Sent Date" arrives as a genuine Sheets date, which is exported
+// through gviz/xlsx with locale-dependent day/month ordering and is NOT safe to parse blindly (a
+// live investigation on this sheet found >30% of rows' parsed month disagreeing with the "Month"
+// column once day<=12, i.e. a day/month swap on export - purely a formatting ambiguity, not a
+// data-entry error). Sent Date is kept only as an optional display/debug field.
+const UPPER_LOG_LABELS = { sentDate:"Sent Date", segment1:"Segment 1", sent:"Sent", delivered:"Delivered", read:"Read", click:"Click", month:"Month" };
+const UPPER_SEG1_TO_DASH = { "New":"New", "Repeat":"Repeat", "LMT":"LMT", "Top Up PDF":"TopUp" }; // "Lainnya" and anything else = unrecognized (logged, not silently dropped)
+
+function parseUpperFunnelLog(rows){
+ const { dataStart, col, missing } = resolveColumnsByHeader(rows, UPPER_LOG_LABELS);
+ const bySeg = {}; // bySeg[seg][month] = { sent, delivered, read, click, rows }
+ const zero = () => ({ sent:0, delivered:0, read:0, click:0, rows:0 });
+ const unrecognizedSeg1 = {};
+ const monthColMissing = col.month == null;
+ for (let i = dataStart; i < rows.length; i++) {
+ const raw1 = cellAtCol(rows, i, col.segment1);
+ if (!raw1) continue;
+ const seg = UPPER_SEG1_TO_DASH[raw1];
+ if (!seg) { unrecognizedSeg1[raw1] = (unrecognizedSeg1[raw1]||0) + 1; continue; }
+ let month = monthColMissing ? null : parseInt(cellAtCol(rows, i, col.month), 10);
+ if (!month || month < 1 || month > 12) continue; // Sent Date is untrustworthy (see note above) - if Month is missing/invalid, skip rather than guess
+ const v = {
+ sent: valAtCol(rows, i, col.sent) || 0,
+ delivered: valAtCol(rows, i, col.delivered) || 0,
+ read: valAtCol(rows, i, col.read) || 0,
+ click: valAtCol(rows, i, col.click) || 0,
+ };
+ bySeg[seg] = bySeg[seg] || {};
+ bySeg[seg][month] = bySeg[seg][month] || zero();
+ Object.keys(v).forEach(k => bySeg[seg][month][k] += v[k]);
+ bySeg[seg][month].rows++;
+ }
+ return { bySeg, unrecognizedSeg1, missingColumns: missing, totalRowsRead: rows.length - dataStart };
+}
+function upperLogVal(agg, seg, metric, month){
+ const s = agg[seg]; if (!s || !s[month]) return null;
+ const v = s[month][metric]; return v == null ? null : v;
 }
 
 // ---- FORECAST: linear regression on the current (in-progress) month's daily cumulative totals,
@@ -988,13 +996,14 @@ async function fetchSheetCSV(sheetName){
 
 function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  const SEGS = ALL_SEGMENTS;
- const upperIdx = buildUpperIndex(upperRows);
  const costIdx = buildCostIndex(costRows);
  const { bySeg: lowerAgg, bySegCh: lowerAggCh, bySegChDate, maxDate, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples } = parseLowerFunnelLog(lowerRows);
+ const { bySeg: upperAgg, unrecognizedSeg1: upperUnrecognizedSeg1, missingColumns: upperMissingColumns } = parseUpperFunnelLog(upperRows);
  const targetAgg = parseTargetLog(targetRows);
 
  const trend = {}, cost = {}, cpa = {}, poAmountCost = {}, budgetAug = {};
  const channelEngage = {}, channelDetail = {}, costByChannel = {};
+ const upperSegTotals = {}; // seg -> {sent:[7], delivered:[7], read:[7], click:[7]} - Upper Funnel no longer has a channel dimension (see parseUpperFunnelLog note), so this is the highest granularity available now.
 
  SEGS.forEach(seg => {
  const srcSeg = COST_SOURCE_SEG[seg]; // "New" / "Repeat+TopUp" / "LMT" / null (SL - no Cost/Upper Funnel source)
@@ -1015,24 +1024,36 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  // ---- COST: only where a Cost Detail source exists ----
  cost[seg] = srcSeg ? [1,2,3,4,5,6,7].map(m => costVal(costRows, costIdx, srcSeg, "Total", m)) : [null,null,null,null,null,null,null];
 
- // ---- Channel detail: Sent/Delivered/Click from Upper Funnel (srcSeg only). Created/Paid Out/Paid
- // Out Amount now come straight from the Lower Funnel log per channel - available for every
- // segment & channel (including Sales AI and SL), which the old sheet format couldn't do.
+ // ---- Upper Funnel segment-level totals (Sent/Delivered/Read/Click) - Upper Funnel maps its own
+ // "Segment 1" to New/Repeat/TopUp/LMT directly now (no COST_SOURCE_SEG combining needed here,
+ // and it's actually MORE granular than Cost Detail: Repeat and TopUp are separate here). SL has
+ // no source in Upper Funnel, same as before.
+ const uSent=[], uDelivered=[], uRead=[], uClick=[];
+ for (let m = 1; m <= 7; m++) {
+ uSent.push(upperLogVal(upperAgg, seg, "sent", m));
+ uDelivered.push(upperLogVal(upperAgg, seg, "delivered", m));
+ uRead.push(upperLogVal(upperAgg, seg, "read", m));
+ uClick.push(upperLogVal(upperAgg, seg, "click", m));
+ }
+ upperSegTotals[seg] = { sent: uSent, delivered: uDelivered, read: uRead, click: uClick };
+
+ // ---- Channel detail: Created/Paid Out/Paid Out Amount come from the Lower Funnel log per channel
+ // - available for every segment & channel (including Sales AI and SL). Sent/Delivered/Click used
+ // to come from Upper Funnel per channel, but Upper Funnel no longer has a channel column at all
+ // (see parseUpperFunnelLog note) - so those are left null here (not guessed/fabricated), and the
+ // segment-level totals now live in upperSegTotals[seg] instead, surfaced separately in the UI.
  channelDetail[seg] = {};
  ALL_CHANNELS.forEach(ch => {
- const sent=[], delivered=[], click=[], created=[], paidOut=[], paidOutAmount=[];
+ const created=[], paidOut=[], paidOutAmount=[];
  for (let m = 1; m <= 7; m++) {
- sent.push(srcSeg ? upperVal(upperRows, upperIdx, srcSeg, ch, "sent", m) : null);
- delivered.push(srcSeg ? upperVal(upperRows, upperIdx, srcSeg, ch, "delivered", m) : null);
- click.push(srcSeg ? upperVal(upperRows, upperIdx, srcSeg, ch, "click", m) : null);
  const chAgg = lowerAggCh[seg] && lowerAggCh[seg][ch] && lowerAggCh[seg][ch][m];
  created.push(chAgg ? chAgg.created : null);
  paidOut.push(chAgg ? chAgg.paidOut : null);
  paidOutAmount.push(chAgg ? chAgg.paidOutAmount : null);
  }
  channelDetail[seg][ch] = {
- sent: sent.some(v=>v!=null) ? sent : null, delivered: delivered.some(v=>v!=null) ? delivered : null,
- click: click.some(v=>v!=null) ? click : null, created: created.some(v=>v!=null) ? created : null,
+ sent: null, delivered: null, click: null, // no longer available per-channel - see note above
+ created: created.some(v=>v!=null) ? created : null,
  paidOut, paidOutAmount,
  };
  });
@@ -1065,55 +1086,39 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  budgetDownside: cpaSeg ? targetPO * (cpaSeg.jul != null ? cpaSeg.jul : cpaSeg.jun) : null,
  };
 
- // ---- Channel engagement Sent/Delivered/Click/Open Jun & Jul ----
+ // ---- Channel engagement Sent/Delivered/Click/Open Jun & Jul - same limitation as channelDetail
+ // above: Upper Funnel no longer splits by channel, so this is left at 0/unavailable per channel.
+ // Use upperSegTotals[seg] (segment-level, all channels combined) for engagement analysis instead -
+ // see renderChannelEngageChart, which now reads from upperSegTotals directly.
  channelEngage[seg] = {};
  ALL_CHANNELS.forEach(ch => {
- channelEngage[seg][ch] = srcSeg ? {
- sentJun: upperVal(upperRows, upperIdx, srcSeg, ch, "sent", 6), deliveredJun: upperVal(upperRows, upperIdx, srcSeg, ch, "delivered", 6), clickJun: upperVal(upperRows, upperIdx, srcSeg, ch, "click", 6), openJun: upperVal(upperRows, upperIdx, srcSeg, ch, "open", 6),
- sentJul: upperVal(upperRows, upperIdx, srcSeg, ch, "sent", 7), deliveredJul: upperVal(upperRows, upperIdx, srcSeg, ch, "delivered", 7), clickJul: upperVal(upperRows, upperIdx, srcSeg, ch, "click", 7), openJul: upperVal(upperRows, upperIdx, srcSeg, ch, "open", 7),
- } : { sentJun:0, deliveredJun:0, clickJun:0, openJun:0, sentJul:0, deliveredJul:0, clickJul:0, openJul:0 };
+ channelEngage[seg][ch] = { sentJun:null, deliveredJun:null, clickJun:null, openJun:null, sentJul:null, deliveredJul:null, clickJul:null, openJul:null };
  });
  });
 
- // ---- Channel CPC table: only segments with a cost source (SL left out entirely, as requested) ----
+ // ---- Channel CPC table: needs Click PER CHANNEL, which Upper Funnel no longer provides (see
+ // note above) - so this table can't be computed live anymore. Left empty rather than showing
+ // fabricated/zeroed numbers; the card explains this via renderChannelTable's empty-state message.
  const channel = [];
- SEGS.forEach(seg => {
- const srcSeg = COST_SOURCE_SEG[seg];
- if (!srcSeg) return;
- ["WhatsApp","Email","Push"].forEach(ch => {
- const e = channelEngage[seg][ch];
- let cpcJun = 0, cpcJul = 0;
- if (ch !== "Push") {
- const cJun = costVal(costRows, costIdx, srcSeg, ch, 6), cJul = costVal(costRows, costIdx, srcSeg, ch, 7);
- cpcJun = e.clickJun ? cJun / e.clickJun : 0;
- cpcJul = e.clickJul ? cJul / e.clickJul : 0;
- }
- let delta = "-", note = "";
- if (ch === "Push") { note = `${nf(e.clickJun)}->${nf(e.clickJul)} klik`; }
- else if (!e.clickJun) { note = "0 klik"; }
- let rec;
- if (ch === "Push") { rec = (e.clickJun === 0 && e.clickJul === 0) ? "fix" : "up"; }
- else if (!cpcJun) { rec = "fix"; }
- else { const d = (cpcJul - cpcJun) / cpcJun; delta = `${d>=0?'+':''}${Math.round(d*100)}%`; rec = d > 0.3 ? "fix" : (d > 0 ? "hold" : "up"); }
- channel.push({ seg, ch, cpcJun: Math.round(cpcJun), cpcJul: Math.round(cpcJul), delta, note, rec });
- });
- });
 
  // ---- Cost Agustus aktual (untuk alert pemakaian budget) ----
  const augCost = {};
  SEGS.forEach(seg => { const srcSeg = COST_SOURCE_SEG[seg]; augCost[seg] = srcSeg ? (costVal(costRows, costIdx, srcSeg, "Total", 8) || 0) : 0; });
 
- // ---- Statistik WhatsApp pooled 3 bulan terakhir (untuk kalkulator pacing) ----
+ // ---- Statistik WhatsApp pooled 3 bulan terakhir (untuk kalkulator pacing). "Sent" per-channel
+ // WhatsApp tidak lagi tersedia dari Upper Funnel (lihat catatan di atas) - poolConvRate sekarang
+ // dihitung dari total Sent segmen (semua channel, dari upperSegTotals) dibagi Created segmen,
+ // bukan spesifik WhatsApp. Ini pendekatan terbaik yang bisa diambil dari struktur sheet saat ini;
+ // kalau butuh conversion rate WhatsApp murni lagi, kolom Channel perlu ditambahkan balik ke Upper Funnel.
  const waStats = {};
  SEGS.forEach(seg => {
- const d = channelDetail[seg].WhatsApp;
- if (d && d.created) {
- const last3Created = d.created.slice(-3).reduce((a,b)=>a+(b||0),0);
- const last3Sent = d.sent ? d.sent.slice(-3).reduce((a,b)=>a+(b||0),0) : 0;
+ const ut = upperSegTotals[seg];
+ const last3Sent = ut.sent.slice(-3).reduce((a,b)=>a+(b||0),0);
  const last3PoCreated = trend[seg].created.slice(-3).reduce((a,b)=>a+(b||0),0);
  const last3Po = trend[seg].po.slice(-3).reduce((a,b)=>a+(b||0),0);
+ if (last3Sent || last3PoCreated) {
  waStats[seg] = {
- poolConvRate: last3Sent ? last3Created/last3Sent : 0,
+ poolConvRate: last3Sent ? last3PoCreated/last3Sent : 0,
  lastMonthWaBudget: (costByChannel[seg].WhatsApp && costByChannel[seg].WhatsApp[6]) || 0,
  poCreatedRatio: last3PoCreated ? last3Po/last3PoCreated : 0,
  };
@@ -1121,9 +1126,10 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  });
 
  return { trend, cost, cpa, poAmountCost, channel, channelEngage, budgetAug, channelDetail, costByChannel, augCost, waStats,
+ upperSegTotals,
  forecastSource: { bySegChDate, maxDate },
  targetAgg,
- debug: { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, upperIdx, costIdx } };
+ debug: { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, upperAgg, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, upperUnrecognizedSeg1, upperMissingColumns, costIdx } };
 }
 
 // ===================== DEBUG PANEL (self-diagnosis, no DevTools needed) =====================
@@ -1131,16 +1137,11 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
 // that row's raw text, so mismatches (wrong sheet structure, ambiguous labels, moved sections)
 // are visible directly in the dashboard instead of needing manual CSV screenshots.
 let LAST_DEBUG = null;
-function rowPreview(rows, row0, maxCols){
- if (row0 == null || row0 < 0 || !rows[row0]) return "(baris tidak ditemukan)";
- const r = rows[row0];
- return `[baris CSV #${row0+1}] ` + r.slice(0, maxCols || 6).map(c => `"${c}"`).join(", ");
-}
 function renderDebugPanel(){
  const el = document.getElementById("debugPanelBody");
  if (!el) return;
  if (!LAST_DEBUG) { el.innerHTML = `<p class='note'>Belum ada data live (masih pakai fallback/cache) - debug panel hanya aktif setelah fetch live berhasil.</p>`; return; }
- const { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, upperIdx, costIdx } = LAST_DEBUG;
+ const { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, upperAgg, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, upperUnrecognizedSeg1, upperMissingColumns, costIdx } = LAST_DEBUG;
  let html = "";
 
  if (dateParseFailCount > 0) {
@@ -1149,6 +1150,10 @@ function renderDebugPanel(){
 
  if (missingColumns && missingColumns.length) {
  html += `<div class='balert-msg ${missingColumns.includes("Segment")||missingColumns.includes("Created Apps")?'bad':'warn'}' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[WARNING]</span><div><b>Kolom tidak ketemu di header Lower Funnel:</b> ${missingColumns.join(', ')} - kalau ini kolom penting (Segment, Created Apps, dll), datanya nggak akan kehitung. "Month" boleh hilang (otomatis diambil dari Created Date), yang lain sebaiknya dikembalikan namanya persis seperti semula.</div></div>`;
+ }
+
+ if (upperMissingColumns && upperMissingColumns.length) {
+ html += `<div class='balert-msg warn' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[WARNING]</span><div><b>Kolom tidak ketemu di header Upper Funnel:</b> ${upperMissingColumns.join(', ')} - kalau ini "Segment 1", "Sent", "Delivered", "Read", "Click", atau "Month", datanya nggak akan kehitung.</div></div>`;
  }
 
  const unrecChKeys = Object.keys(unrecognizedChannel || {});
@@ -1161,6 +1166,13 @@ function renderDebugPanel(){
  html += `<div class='balert-msg warn' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[WARNING]</span><div><b>Nilai Segment tidak dikenali di Lower Funnel log:</b> ${unrecKeys.map(k=>`"${k}" (${unrecognizedSeg[k]} baris)`).join(', ')} - baris ini di-skip, tidak ikut terhitung di manapun.</div></div>`;
  }
 
+ const unrecSeg1Keys = Object.keys(upperUnrecognizedSeg1 || {});
+ if (unrecSeg1Keys.length) {
+ html += `<div class='balert-msg warn' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[WARNING]</span><div><b>Nilai "Segment 1" tidak dikenali di Upper Funnel log:</b> ${unrecSeg1Keys.map(k=>`"${k}" (${upperUnrecognizedSeg1[k]} baris)`).join(', ')} - kode cuma kenal "New", "Repeat", "LMT", "Top Up PDF". Baris ini di-skip dari Sent/Delivered/Read/Click - kalau jumlahnya besar, cek apakah ini seharusnya masuk salah satu segmen di atas atau memang segmen baru yang belum dipetakan.</div></div>`;
+ }
+
+ html += `<div class='balert-msg info' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[INFO]</span><div><b>Upper Funnel sekarang log per-tanggal-kirim (bukan lagi tabel bulanan), dan TIDAK PUNYA kolom Channel</b> - Sent/Delivered/Read/Click cuma bisa dihitung per Segmen (semua channel digabung), bukan per WhatsApp/Email/Push seperti sebelumnya. Kalau breakdown per-channel masih dibutuhkan, kolom Channel perlu ditambahkan balik ke sheet Upper Funnel.</div></div>`;
+
  html += `<h4 style='font-size:12px;margin:14px 0 6px;'>Lower Funnel (log mentah, ${lowerRows.length} baris CSV) - Total per Segmen per Bulan</h4><table class='dt'><thead><tr><th>Segmen</th><th>Bulan</th><th class='num'>Jumlah baris</th><th class='num'>Created</th><th class='num'>After FF</th><th class='num'>Eligible</th><th class='num'>Accepted</th><th class='num'>Paid Out</th><th class='num'>Paid Out Amount</th></tr></thead><tbody>`;
  ALL_SEGMENTS.forEach(seg => {
  const segData = lowerAgg[seg];
@@ -1169,6 +1181,18 @@ function renderDebugPanel(){
  const d = segData[m];
  if (!d) { html += `<tr><td>${seg}</td><td>${MONTHS[m-1]}</td><td colspan='6' style='color:var(--muted);'>Tidak ada data</td></tr>`; continue; }
  html += `<tr><td>${seg}</td><td>${MONTHS[m-1]}</td><td class='num'>${d.rows}</td><td class='num'>${nf(d.created)}</td><td class='num'>${nf(d.afterFF)}</td><td class='num'>${nf(d.eligible)}</td><td class='num'>${nf(d.accepted)}</td><td class='num'>${nf(d.paidOut)}</td><td class='num'>${rp(d.paidOutAmount)}</td></tr>`;
+ }
+ });
+ html += `</tbody></table>`;
+
+ html += `<h4 style='font-size:12px;margin:14px 0 6px;'>Upper Funnel (log mentah, ${upperRows.length} baris CSV) - Total per Segmen per Bulan</h4><table class='dt'><thead><tr><th>Segmen</th><th>Bulan</th><th class='num'>Jumlah baris</th><th class='num'>Sent</th><th class='num'>Delivered</th><th class='num'>Read</th><th class='num'>Click</th></tr></thead><tbody>`;
+ ALL_SEGMENTS.forEach(seg => {
+ const segData = upperAgg[seg];
+ if (!segData) { html += `<tr><td>${seg}</td><td colspan='6' style='color:var(--bad);'>Tidak ada baris log untuk segmen ini</td></tr>`; return; }
+ for (let m = 1; m <= 7; m++) {
+ const d = segData[m];
+ if (!d) { html += `<tr><td>${seg}</td><td>${MONTHS[m-1]}</td><td colspan='5' style='color:var(--muted);'>Tidak ada data</td></tr>`; continue; }
+ html += `<tr><td>${seg}</td><td>${MONTHS[m-1]}</td><td class='num'>${d.rows}</td><td class='num'>${nf(d.sent)}</td><td class='num'>${nf(d.delivered)}</td><td class='num'>${nf(d.read)}</td><td class='num'>${nf(d.click)}</td></tr>`;
  }
  });
  html += `</tbody></table>`;
@@ -1184,10 +1208,10 @@ function renderDebugPanel(){
  });
  html += `</tbody></table>`;
 
- html += `<h4 style='font-size:12px;margin:14px 0 6px;'>Upper Funnel & Cost Detail (format pivot lama, dipetakan lewat COST_SOURCE_SEG)</h4><table class='dt'><thead><tr><th>Segmen dashboard</th><th>Sumber di Upper Funnel / Cost Detail</th><th>Status</th></tr></thead><tbody>`;
+ html += `<h4 style='font-size:12px;margin:14px 0 6px;'>Cost Detail (format pivot lama, dipetakan lewat COST_SOURCE_SEG)</h4><table class='dt'><thead><tr><th>Segmen dashboard</th><th>Sumber di Cost Detail</th><th>Status</th></tr></thead><tbody>`;
  ALL_SEGMENTS.forEach(seg => {
  const src = COST_SOURCE_SEG[seg];
- html += `<tr><td>${seg}</td><td>${src || '-'}</td><td>${src ? (upperIdx[src] ? 'ketemu di Upper Funnel' : '<span style="color:var(--bad);">header segmen tidak ketemu</span>') : '<span style="color:var(--muted);">sengaja di-exclude (tidak ada sumber)</span>'}</td></tr>`;
+ html += `<tr><td>${seg}</td><td>${src || '-'}</td><td>${src ? (costIdx[src] ? 'ketemu di Cost Detail' : '<span style="color:var(--bad);">header segmen tidak ketemu</span>') : '<span style="color:var(--muted);">sengaja di-exclude (tidak ada sumber)</span>'}</td></tr>`;
  });
  html += `</tbody></table>`;
 
@@ -1209,6 +1233,7 @@ async function loadLiveData(){
  CHANNEL_ENGAGE = computed.channelEngage; BUDGET_AUG = computed.budgetAug;
  CHANNEL_DETAIL = computed.channelDetail; COST_BY_CHANNEL = computed.costByChannel;
  AUG_COST = computed.augCost; WA_STATS = computed.waStats;
+ UPPER_SEG_TOTALS = computed.upperSegTotals;
  FORECAST_SOURCE = computed.forecastSource;
  TARGET_AGG = computed.targetAgg;
  LAST_DEBUG = computed.debug;
@@ -1225,6 +1250,7 @@ async function loadLiveData(){
  CHANNEL_ENGAGE = CHANNEL_ENGAGE_FALLBACK; BUDGET_AUG = BUDGET_AUG_FALLBACK;
  CHANNEL_DETAIL = CHANNEL_DETAIL_FALLBACK; COST_BY_CHANNEL = COST_BY_CHANNEL_FALLBACK;
  AUG_COST = AUG_COST_FALLBACK; WA_STATS = WA_STATS_FALLBACK;
+ UPPER_SEG_TOTALS = {};
  FORECAST_SOURCE = null;
  TARGET_AGG = null;
  LAST_DEBUG = null;
@@ -1235,6 +1261,7 @@ async function loadLiveData(){
  btn.disabled = false;
  }
 }
+let UPPER_SEG_TOTALS = {}; // seg -> {sent:[7],delivered:[7],read:[7],click:[7]} monthly, all channels combined (see parseUpperFunnelLog note)
 
 // ===================== STATISTICAL ENGINE (Findings / Insight / Rekomendasi) =====================
 // z-score of a current value against the mean & spread of a set of historical values - answers
@@ -1986,27 +2013,34 @@ function renderJunJulChart(f){
 }
 
 // ===================== CHANNEL ENGAGEMENT CHART =====================
+// Upper Funnel no longer has a Channel column (see parseUpperFunnelLog note) - Sent/Delivered/
+// Read/Click can only be aggregated per SEGMENT now, not per channel. This chart is therefore
+// rewritten to compare Jun vs Jul at the segment level (from UPPER_SEG_TOTALS), summed across the
+// segments selected in the Segmen filter. The Channel filter no longer affects this specific chart
+// (there is nothing left to filter it by) - this is called out explicitly in the caption below.
 function renderChannelEngageChart(f){
  const ctx = document.getElementById("channelEngageChart").getContext("2d");
  const segList = segs(f.seg);
- const chList = chans(f.ch);
 
- const sum = (metric, monthKey) => {
- let total = 0;
- segList.forEach(seg => chList.forEach(ch => { total += (CHANNEL_ENGAGE[seg][ch][metric + monthKey] || 0); }));
- return total;
+ const sum = (metric, monthIdx0) => {
+ let total = 0, any = false;
+ segList.forEach(seg => {
+ const ut = UPPER_SEG_TOTALS[seg];
+ const v = ut && ut[metric] ? ut[metric][monthIdx0] : null;
+ if (v != null) { total += v; any = true; }
+ });
+ return any ? total : 0;
  };
- const sentJun = sum("sent","Jun"), deliveredJun = sum("delivered","Jun"), clickJun = sum("click","Jun"), openJun = sum("open","Jun");
- const sentJul = sum("sent","Jul"), deliveredJul = sum("delivered","Jul"), clickJul = sum("click","Jul"), openJul = sum("open","Jul");
+ // Jun = index 5, Jul = index 6 (0-based, Jan=0)
+ const sentJun = sum("sent",5), deliveredJun = sum("delivered",5), clickJun = sum("click",5), openJun = sum("read",5);
+ const sentJul = sum("sent",6), deliveredJul = sum("delivered",6), clickJul = sum("click",6), openJul = sum("read",6);
 
- // Rates computed from the aggregated totals above (not averaged from per-channel sheet %), so
- // they stay correct under any multi-select segment/channel combination.
  const deliveryRateJun = sentJun ? deliveredJun/sentJun : null, deliveryRateJul = sentJul ? deliveredJul/sentJul : null;
  const readRateJun = deliveredJun ? openJun/deliveredJun : null, readRateJul = deliveredJul ? openJul/deliveredJul : null;
  const clickRateJun = sentJun ? clickJun/sentJun : null, clickRateJul = sentJul ? clickJul/sentJul : null;
 
  document.getElementById("channelEngageCap").textContent =
- `Bar = Sent/Delivered/Click (jumlah). Garis = Delivery Rate, Read Rate (Open/Delivered), Click Rate/CTR (Click/Sent)${chCapText(chList)}${segCapText(segList)} (data granular hanya tersedia Jun-Jul; Sales AI & segmen SL belum punya data ini di sheet)`;
+ `Bar = Sent/Delivered/Click (jumlah). Garis = Delivery Rate, Read Rate (Open/Delivered), Click Rate/CTR (Click/Sent)${segCapText(segList)}. [PERHATIAN] Upper Funnel sudah tidak punya kolom Channel lagi - angka ini per Segmen (gabungan semua channel), filter Channel di atas tidak berlaku untuk chart ini.`;
 
  if (charts.chengage) charts.chengage.destroy();
  charts.chengage = new Chart(ctx, {
@@ -2296,53 +2330,60 @@ function renderFunnelRatioTable(f){
 }
 
 // ===================== CHANNEL DETAIL TABLE (Sent/Delivered/Click/Created) =====================
+// Upper Funnel no longer has a Channel column, so Sent/Delivered/Click are no longer available
+// per-channel - only per-segment totals exist now (UPPER_SEG_TOTALS). This table is rewritten to
+// show one row per SEGMENT (instead of one row per channel within each segment) for those three
+// metrics, while Created (still available per-channel from the Lower Funnel log) keeps its
+// per-channel breakdown underneath.
 function renderChannelDetailTable(f){
  const list = segs(f.seg);
  const chList = chans(f.ch);
  const m = f.month;
  const val = (arr) => arr ? (m === "all" ? sumArr(arr) : arr[m]) : null;
  document.getElementById("channelDetailCap").textContent =
- `${m === 'all' ? 'Semua Bulan (Jan-Jul, akumulasi)' : 'Bulan: '+MONTHS[m]}${segCapText(f.seg)}${chCapText(f.ch)} - panjang bar Delivered & Click relatif terhadap Sent (100%)`;
+ `${m === 'all' ? 'Semua Bulan (Jan-Jul, akumulasi)' : 'Bulan: '+MONTHS[m]}${segCapText(f.seg)} - Sent/Delivered/Click sekarang per Segmen (Upper Funnel tidak lagi punya kolom Channel); Created tetap per Channel${chCapText(f.ch)}.`;
 
- const CH_COLOR = { WhatsApp: BLUE, Email: TEAL, Push: LIME };
  let html = "";
  let anyRow = false;
 
  list.forEach(seg => {
- const rowsHtml = chList.map(ch => {
- const d = CHANNEL_DETAIL[seg][ch];
- if (!d) return "";
- const sent = val(d.sent) || 0, delivered = val(d.delivered) || 0, click = val(d.click) || 0;
+ const ut = UPPER_SEG_TOTALS[seg];
+ const sent = ut ? (val(ut.sent) || 0) : 0;
+ const delivered = ut ? (val(ut.delivered) || 0) : 0;
+ const click = ut ? (val(ut.click) || 0) : 0;
+ const hasUpper = ut && (val(ut.sent) != null);
  const delivPct = sent ? (delivered/sent*100) : 0;
  const clickPct = sent ? (click/sent*100) : 0;
- const createdVal = d.created ? nf(val(d.created)) : "-";
- const color = CH_COLOR[ch];
- return `
- <div class='fch-row'>
- <div class='fch-name'>${ch}</div>
- <div class='fch-bars'>
- <div class='fbar-line'>
- <div class='fbar-label'>Sent <b>${nf(sent)}</b></div>
- <div class='fbar-track'><div class='fbar-fill' style='width:100%;background:${color};opacity:.9;'></div></div>
- </div>
- <div class='fbar-line'>
- <div class='fbar-label'>Delivered <b>${nf(delivered)}</b> (${delivPct.toFixed(1).replace('.',',')}%)</div>
- <div class='fbar-track'><div class='fbar-fill' style='width:${Math.min(delivPct,100)}%;background:${color};opacity:.6;'></div></div>
- </div>
- <div class='fbar-line'>
- <div class='fbar-label'>Click <b>${nf(click)}</b> (${clickPct.toFixed(1).replace('.',',')}%)</div>
- <div class='fbar-track'><div class='fbar-fill' style='width:${Math.min(clickPct,100)}%;background:${color};opacity:.35;'></div></div>
- </div>
- </div>
- <div class='fch-created'>Created<b>${createdVal}</b></div>
- </div>`;
+
+ const createdRowsHtml = chList.map(ch => {
+ const d = CHANNEL_DETAIL[seg][ch];
+ const createdVal = (d && d.created) ? nf(val(d.created)) : "-";
+ return `<span style='margin-right:14px;'><b>${CH_DISPLAY[ch]||ch}</b>: ${createdVal}</span>`;
  }).join("");
- if (!rowsHtml) return;
+
+ if (!hasUpper && !chList.some(ch => CHANNEL_DETAIL[seg][ch] && CHANNEL_DETAIL[seg][ch].created)) return;
  anyRow = true;
  html += `
  <div class='seg-group'>
  <div class='seg-group-title' style='background:${SEG_COLORS[seg]}18;color:${SEG_COLORS[seg]}'>${seg}</div>
- ${rowsHtml}
+ ${hasUpper ? `
+ <div class='fch-row' style='grid-template-columns:1fr;'>
+ <div class='fch-bars'>
+ <div class='fbar-line'>
+ <div class='fbar-label'>Sent <b>${nf(sent)}</b></div>
+ <div class='fbar-track'><div class='fbar-fill' style='width:100%;background:${SEG_COLORS[seg]};opacity:.9;'></div></div>
+ </div>
+ <div class='fbar-line'>
+ <div class='fbar-label'>Delivered <b>${nf(delivered)}</b> (${delivPct.toFixed(1).replace('.',',')}%)</div>
+ <div class='fbar-track'><div class='fbar-fill' style='width:${Math.min(delivPct,100)}%;background:${SEG_COLORS[seg]};opacity:.6;'></div></div>
+ </div>
+ <div class='fbar-line'>
+ <div class='fbar-label'>Click <b>${nf(click)}</b> (${clickPct.toFixed(1).replace('.',',')}%)</div>
+ <div class='fbar-track'><div class='fbar-fill' style='width:${Math.min(clickPct,100)}%;background:${SEG_COLORS[seg]};opacity:.35;'></div></div>
+ </div>
+ </div>
+ </div>` : `<div class='note'>Tidak ada data Sent/Delivered/Click Upper Funnel untuk segmen ini.</div>`}
+ <div style='margin-top:8px;font-size:11.5px;'><span style='color:var(--muted);'>Created per channel:</span><br>${createdRowsHtml || '<span class="note">Tidak ada data</span>'}</div>
  </div>`;
  });
 
@@ -2351,28 +2392,29 @@ function renderChannelDetailTable(f){
 
  const el = document.getElementById("channelDetailFIR");
  if (el) {
- const chStats = chList.map(ch => {
- let sent=0, click=0;
- list.forEach(seg => { const d = CHANNEL_DETAIL[seg][ch]; if (d && d.sent) { sent += val(d.sent)||0; click += val(d.click)||0; } });
- return { ch, sent, click, rate: sent ? click/sent : null };
+ const segStats = list.map(seg => {
+ const ut = UPPER_SEG_TOTALS[seg];
+ const sent = ut ? (val(ut.sent) || 0) : 0;
+ const click = ut ? (val(ut.click) || 0) : 0;
+ return { seg, sent, click, rate: sent ? click/sent : null };
  }).filter(x => x.sent > 0);
- if (chStats.length < 2) {
- el.innerHTML = firHtml("Kurang dari 2 channel dengan data Sent - tidak ada perbandingan yang bisa dibuat.","-","-");
+ if (segStats.length < 2) {
+ el.innerHTML = firHtml("Kurang dari 2 segmen dengan data Sent - tidak ada perbandingan yang bisa dibuat.","-","-");
  } else {
- chStats.sort((a,b)=>b.rate-a.rate);
- const best = chStats[0], worst = chStats[chStats.length-1];
+ segStats.sort((a,b)=>b.rate-a.rate);
+ const best = segStats[0], worst = segStats[segStats.length-1];
  const test = twoProportionZTest(best.click, best.sent, worst.click, worst.sent);
  const v = zVerdict(test.z);
- const findings = `Click rate tertinggi: ${best.ch} (${pct(best.rate,2)}). Click rate terendah: ${worst.ch} (${pct(worst.rate,2)}).`;
- const insight = `Selisih antara ${best.ch} dan ${worst.ch} ${v.text} (two-proportion z-test, z=${test.z.toFixed(2)}).`;
+ const findings = `Click rate tertinggi: ${best.seg} (${pct(best.rate,2)}). Click rate terendah: ${worst.seg} (${pct(worst.rate,2)}).`;
+ const insight = `Selisih antara ${best.seg} dan ${worst.seg} ${v.text} (two-proportion z-test, z=${test.z.toFixed(2)}).`;
  const tier = zTier(test.z);
  let recommendation;
  if (tier === "strong" || tier === "significant") {
- recommendation = `Perbedaan performa antar-channel ini nyata secara statistik - Action: geser 15-20% budget/effort dari ${worst.ch} ke ${best.ch}, DAN paralel audit konten/targeting ${worst.ch} (bukan langsung ditinggalkan, cari tahu dulu akar masalahnya).`;
+ recommendation = `Perbedaan performa antar-segmen ini nyata secara statistik - Action: cek konten/targeting ${worst.seg} dibanding ${best.seg}, dan pertimbangkan realokasi effort 15-20% ke segmen yang lebih responsif.`;
  } else if (tier === "watch") {
- recommendation = `Ada indikasi ${best.ch} lebih unggul dari ${worst.ch} (belum signifikan penuh) - Action: uji kecil dulu (geser 5-10% budget) sebelum realokasi besar.`;
+ recommendation = `Ada indikasi ${best.seg} lebih unggul dari ${worst.seg} (belum signifikan penuh) - Action: pantau 1-2 siklus lagi sebelum realokasi besar.`;
  } else {
- recommendation = `Perbedaan antar-channel belum cukup besar buat dibilang satu channel "lebih baik" secara statistik - Action: jangan realokasi budget cuma dari angka ini, pertahankan alokasi saat ini.`;
+ recommendation = `Perbedaan antar-segmen belum cukup besar buat dibilang satu segmen "lebih baik" secara statistik - Action: jangan realokasi effort cuma dari angka ini, pertahankan strategi saat ini.`;
  }
  el.innerHTML = firHtml(findings, insight, recommendation);
  }
@@ -2457,96 +2499,20 @@ function renderCostByChannelTable(f){
  }
 }
 
-// ===================== CHANNEL TABLE =====================
-function cpcStats(seg, ch){
- // CPC Jan..Jul, lalu baseline = median dari sampai 3 bulan valid (klik>0) sebelum Juli - robust terhadap outlier dibanding rata-rata/z-score.
- const costArr = COST_BY_CHANNEL[seg][ch];
- const clickArr = CHANNEL_DETAIL[seg][ch] ? CHANNEL_DETAIL[seg][ch].click : null;
- if (!costArr || !clickArr) return null;
- const cpc = costArr.map((c,i) => clickArr[i] ? c/clickArr[i] : null);
- const julCpc = cpc[6];
- if (julCpc == null) return null;
- const priorValid = [];
- for (let i = 5; i >= 0 && priorValid.length < 3; i--) { if (cpc[i] != null) priorValid.push(cpc[i]); }
- if (priorValid.length === 0) return null;
- const sorted = [...priorValid].sort((a,b)=>a-b);
- const mid = Math.floor(sorted.length/2);
- const median = sorted.length % 2 ? sorted[mid] : (sorted[mid-1]+sorted[mid])/2;
- const dev = median ? (julCpc-median)/median : 0;
- return { julCpc, median, dev, nBaseline: priorValid.length };
-}
-
+// ===================== CHANNEL TABLE (CPC per channel) =====================
+// This table needs per-channel Click, which Upper Funnel no longer provides (see
+// parseUpperFunnelLog note) - it's shown as an explicit empty state instead of fabricating zeros.
 function renderChannelInsight(f){
- const list = segs(f.seg);
- const chList = chans(f.ch).filter(ch => ch !== "Push"); // Push cost selalu 0, tidak relevan untuk alert CPC
- const cards = [];
- const normalNotes = [];
-
- list.forEach(seg => {
- chList.forEach(ch => {
- const s = cpcStats(seg, ch);
- if (!s) return;
- const devPct = s.dev * 100;
- if (devPct > 50) {
- cards.push({ cls:"bad", icon:"[ALERT]", seg, ch, devPct, s,
- rec: `Naik ${devPct.toFixed(0)}% dari median ${rp(s.median)} (3 bulan sebelumnya) ke ${rp(s.julCpc)} - jauh di luar rentang variasi normal, kemungkinan besar bukan fluktuasi acak. <b>Rekomendasi:</b> (1) audit konten/targeting campaign channel ini, (2) cek apakah ada perubahan rate card dari vendor/provider, (3) tahan dulu penambahan budget di channel ini sampai investigasi selesai, (4) bandingkan dengan channel lain yang stabil sebagai pembanding.` });
- } else if (devPct > 20) {
- cards.push({ cls:"warn", icon:"[WARNING]", seg, ch, devPct, s,
- rec: `Naik ${devPct.toFixed(0)}% dari median ${rp(s.median)} ke ${rp(s.julCpc)} - di atas variasi normal tapi belum ekstrem. <b>Rekomendasi:</b> pantau 1-2 siklus berikutnya sebelum ambil tindakan besar; uji perubahan kecil (A/B konten/targeting) dulu; jangan langsung tambah budget besar sampai tren berikutnya konfirmasi apakah ini kenaikan sementara atau permanen.` });
- } else {
- normalNotes.push(`${seg} - ${ch} (${devPct>=0?'+':''}${devPct.toFixed(0)}% vs median)`);
- }
- });
- });
-
  const insightEl = document.getElementById("channelTableInsight");
- let html = "";
- if (cards.length) {
- html += `<h3 style='font-size:11.5px;margin:14px 0 4px;'> Alert CPC - Analisis Statistik</h3>
- <div class='note' style='margin:0 0 6px;font-size:10px;'>Baseline = median CPC 3 bulan sebelumnya (median dipilih karena tahan terhadap bulan-bulan outlier, dibanding rata-rata biasa).</div>`;
- cards.sort((a,b)=>b.devPct-a.devPct).forEach(c => {
- html += `<div class='balert-msg ${c.cls}' style='margin-top:8px;align-items:flex-start;font-size:11px;font-weight:400;'>
- <span>${c.icon}</span>
- <div><b style='font-size:11.5px;'>${c.seg} - ${c.ch}</b><br>${c.rec}</div>
- </div>`;
- });
- }
- if (normalNotes.length) {
- html += `<div class='balert-msg ok' style='margin-top:10px;align-items:flex-start;font-size:11px;font-weight:400;'>
- <span>[OK]</span>
- <div><b style='font-size:11.5px;'>Dalam rentang wajar / membaik</b> (+/-20% dari median 3 bulan sebelumnya): ${normalNotes.join(', ')}.</div>
- </div>`;
- }
- if (!cards.length && !normalNotes.length) {
- html = `<p class='note' style='margin-top:10px;'>Belum cukup data historis untuk analisis statistik pada kombinasi filter ini.</p>`;
- }
- insightEl.innerHTML = html;
+ insightEl.innerHTML = "";
 }
 
 function renderChannelTable(f){
- const chList = chans(f.ch);
- const rows = CHANNEL.filter(r => (f.seg.includes(r.seg)) && chList.includes(r.ch));
- const recLabel = { up: ["Kuatkan","up"], hold: ["Tahan/Monitor","hold"], fix: ["Fix dulu","fix"] };
  let html = `<thead><tr>
  <th>Segmen</th><th>Channel</th><th class='num'>CPC Jun</th><th class='num'>CPC Jul</th><th class='num'>Delta</th><th>Catatan</th><th>Rekomendasi</th>
- </tr></thead><tbody>`;
- if (rows.length === 0) {
- html += `<tr><td colspan='7' style='text-align:center;color:var(--muted);padding:16px;'>Tidak ada data untuk kombinasi filter ini</td></tr>`;
- }
- rows.forEach(r => {
- const [label, cls] = recLabel[r.rec];
- const deltaColor = r.delta.startsWith("+") ? "pos" : (r.delta.startsWith("-") ? "neg" : "");
- html += `<tr>
- <td><b style='color:${SEG_COLORS[r.seg]}'>${r.seg}</b></td>
- <td>${r.ch}</td>
- <td class='num'>${r.cpcJun ? rp(r.cpcJun) : '0 klik'}</td>
- <td class='num'>${r.cpcJul ? rp(r.cpcJul) : '0 klik'}</td>
- <td class='num'><span class='pill ${deltaColor}'>${r.delta}</span></td>
- <td>${r.note}</td>
- <td><span class='tag ${cls}'>${label}</span></td>
- </tr>`;
- });
- html += "</tbody>";
+ </tr></thead><tbody>
+ <tr><td colspan='7' style='text-align:center;color:var(--muted);padding:16px;'>Tabel ini butuh Click per Channel dari Upper Funnel, yang sudah tidak tersedia lagi sejak sheet direstrukturisasi (Upper Funnel sekarang tidak punya kolom Channel, hanya Segmen). Kalau breakdown CPC per channel masih dibutuhkan, tambahkan kembali kolom Channel di sheet Upper Funnel.</td></tr>
+ </tbody>`;
  document.getElementById("channelTable").innerHTML = html;
  renderChannelInsight(f);
 }
@@ -2686,8 +2652,10 @@ function renderPacingStrategy(seg, weeks, totalW, budget, targetCreatedInput, ta
  const metrics = SEGMENT_FOCUS_METRICS[seg] || ["created","paidOut","paidOutAmount"];
  sections.push({ title: "Metrik yang Wajib Dipantau Mingguan", body: `Untuk segmen ${seg}, fokus pantau <b>${metrics.map(m=>METRIC_LABEL[m]).join(', ')}</b> tiap minggu (bukan nunggu akhir bulan) - kalau salah satu di bawah pace target di minggu berjalan, ambil tindakan minggu itu juga. Nunggu sampai akhir bulan berarti kehilangan waktu buat koreksi.` });
 
- // 3. Delivery/Read/Click rate diagnostics -> concrete content/A-B test recommendations, tied to
- // WHICH specific metric is weak (delivery = technical issue, read = timing/preview, click = content/offer).
+ // 3. Delivery/Read/Click rate diagnostics -> concrete content/A-B test recommendations. NOTE: this
+ // still reads from CHANNEL_ENGAGE (per-channel WhatsApp), which Upper Funnel no longer populates
+ // (see parseUpperFunnelLog note) - engagementDiagnostics will now return null for every segment, so
+ // this section gracefully falls back to its "belum cukup data" message below.
  const diag = engagementDiagnostics(seg, "WhatsApp");
  if (diag) {
  const { delivTest, clickTest, readTest } = diag;
@@ -2715,7 +2683,7 @@ function renderPacingStrategy(seg, weeks, totalW, budget, targetCreatedInput, ta
  if (!parts.length) parts.push(`Delivery, Read, dan Click rate semuanya stabil dalam rentang wajar bulan ini - nggak ada red flag di sisi engagement, fokus optimasi bisa dialihkan ke volume/budget dulu.`);
  sections.push({ title: "Delivery / Read / Click Rate & Rekomendasi Konten", body: parts.join('<br><br>') });
  } else {
- sections.push({ title: "Delivery / Read / Click Rate", body: `Belum cukup data Jun-Jul untuk channel WhatsApp segmen ini buat dianalisis.` });
+ sections.push({ title: "Delivery / Read / Click Rate", body: `Belum tersedia untuk channel WhatsApp spesifik - Upper Funnel sudah tidak punya kolom Channel lagi, jadi delivery/read/click rate cuma bisa dihitung level Segmen (lihat card "Engagement per Channel - Jun vs Jul" di atas, sekarang breakdown per Segmen).` });
  }
 
  box.innerHTML = `
@@ -2732,7 +2700,7 @@ function renderPacingCalculator(f){
  const defaultSeg = preferred || available[0] || "New";
  const container = document.getElementById("pacingCalc");
  if (!container) return;
- if (!available.length) { container.innerHTML = `<p class='note'>Belum ada data WhatsApp (Sent &amp; Created) yang cukup untuk segmen manapun.</p>`; return; }
+ if (!available.length) { container.innerHTML = `<p class='note'>Belum ada data (Sent &amp; Created) yang cukup untuk segmen manapun.</p>`; return; }
  const hist = FORECAST_SOURCE ? historicalWeekWeights(FORECAST_SOURCE.bySegChDate, defaultSeg, "WhatsApp") : null;
  const w = hist ? { w1: Math.round(hist.w1*100), w2: Math.round(hist.w2*100), w3: Math.round(hist.w3*100), w4: Math.round(hist.w4*100) } : { w1:30, w2:20, w3:20, w4:30 };
  // rounding can make these not sum to exactly 100 - nudge week4 to absorb the remainder
@@ -2757,6 +2725,7 @@ function renderPacingCalculator(f){
  <div class='calc-field'>
  <label>Conversion Rate Created/Sent (%)</label>
  <input type='number' id='calcConv' value='${(WA_STATS[defaultSeg].poolConvRate*100).toFixed(3)}' step='0.001' oninput='recomputePacing()'>
+ <div class='note' style='margin-top:4px;'>Dihitung dari total Sent Upper Funnel segmen ini (semua channel gabung, bukan spesifik WhatsApp - lihat catatan di Debug panel).</div>
  </div>
  <div class='calc-field'>
  <label>Conversion Rate Paid Out/Created (%)</label>
@@ -2923,7 +2892,7 @@ function recomputePacing(){
  document.getElementById("calcMethodNote").innerHTML =
  `<b>Metode:</b> Budget / Harga/pesan = estimasi pesan terkirim. Pesan terkirim x Conversion Rate Created/Sent = estimasi Created. Created x Conversion Rate Paid Out/Created = estimasi Paid Out.<br>
  Kalau kolom [TARGET] Target diubah, <b>Budget WA Bulanan</b> otomatis terisi angka kebutuhannya sebagai starting point - tapi field Budget tetap bisa Anda ubah manual kapan saja; insight di bawah tabel akan otomatis menyesuaikan (gap analysis + saran) berdasarkan budget yang sedang Anda pakai, bukan cuma angka hasil auto-fill.<br>
- Kedua conversion rate di atas dihitung pakai <b>pooled ratio 3 bulan terakhir</b> (Mei-Jul: total Created / total Sent WhatsApp = ${(WA_STATS[seg].poolConvRate*100).toFixed(3)}%; total Paid Out / total Created segmen = ${(WA_STATS[seg].poCreatedRatio*100).toFixed(2)}%) - bukan rata-rata sederhana per bulan, supaya bulan bervolume kecil tidak mendominasi, dan pakai 3 bulan terakhir (bukan Jan-Jul penuh) supaya lebih mencerminkan performa terkini.<br>
+ Kedua conversion rate di atas dihitung pakai <b>pooled ratio 3 bulan terakhir</b> (Mei-Jul: total Created / total Sent = ${(WA_STATS[seg].poolConvRate*100).toFixed(3)}%; total Paid Out / total Created segmen = ${(WA_STATS[seg].poCreatedRatio*100).toFixed(2)}%) - bukan rata-rata sederhana per bulan, supaya bulan bervolume kecil tidak mendominasi, dan pakai 3 bulan terakhir (bukan Jan-Jul penuh) supaya lebih mencerminkan performa terkini. [PERHATIAN] "Sent" di sini sudah level Segmen (semua channel gabung), bukan spesifik WhatsApp - Upper Funnel tidak lagi punya kolom Channel.<br>
  Bobot mingguan di atas dihitung dari histori Created harian yang sebenarnya (lihat catatan di atas tabel input minggu) kalau datanya cukup - bukan lagi asumsi tetap 30/20/20/30.`;
 
  renderPacingStrategy(seg, weeks, totalW, budget, targetCreatedInput, targetPoInput, totalCreated, totalPo);
