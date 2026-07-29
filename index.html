@@ -175,6 +175,15 @@
  <label><input type="checkbox" value="LMT" checked onchange="onMultiFilterChange()"> LMT</label>
  </div>
  </div>
+ <div class="msdrop filter-group" id="seg1FilterWrap">
+ <label>Segment 1</label>
+ <button type="button" class="msdrop-btn" onclick="toggleDropdown('seg1FilterWrap')">Semua Segment 1 ▾</button>
+ <div class="msdrop-panel" id="seg1FilterPanel">
+ <label><input type="checkbox" value="New" checked onchange="onMultiFilterChange()"> New</label>
+ <label><input type="checkbox" value="Repeat + Top Up" checked onchange="onMultiFilterChange()"> Repeat + Top Up</label>
+ <label><input type="checkbox" value="LMT" checked onchange="onMultiFilterChange()"> LMT</label>
+ </div>
+ </div>
  <div class="msdrop filter-group" id="chFilterWrap">
  <label>Channel</label>
  <button type="button" class="msdrop-btn" onclick="toggleDropdown('chFilterWrap')">Semua Channel ▾</button>
@@ -1551,14 +1560,30 @@ let calcInitializedWithLiveData = false;
 function checkedValues(panelId){
  return Array.from(document.querySelectorAll(`#${panelId} input[type=checkbox]:checked`)).map(el => el.value);
 }
+// Segment 1 (New/Repeat + Top Up/LMT) is a coarser grouping already implied by Segmen (New->New,
+// Repeat & TopUp->"Repeat + Top Up", LMT->LMT) - so rather than threading a third filter dimension
+// through every render function, the Segment 1 selection is resolved here into the equivalent set
+// of Segmen values, then intersected with whatever the Segmen dropdown has selected. Every existing
+// function that reads f.seg therefore automatically respects Segment 1 too, with no other changes.
+const ALL_SEGMENT1 = ["New","Repeat + Top Up","LMT"];
+const SEGMENT1_TO_DASH_SEGS = { "New": ["New"], "Repeat + Top Up": ["Repeat","TopUp"], "LMT": ["LMT"] };
+
 function getFilters(){
  const monthVal = document.getElementById("monthFilter").value;
  const segSel = checkedValues("segFilterPanel");
+ const seg1Sel = checkedValues("seg1FilterPanel");
  const chSel = checkedValues("chFilterPanel");
  const dateFrom = document.getElementById("dateFrom").value; // "" or "YYYY-MM-DD"
  const dateTo = document.getElementById("dateTo").value;
+
+ const segEffective = segSel.length ? segSel : ALL_SEGMENTS.slice();
+ const seg1Effective = seg1Sel.length ? seg1Sel : ALL_SEGMENT1.slice();
+ const segFromSeg1 = new Set();
+ seg1Effective.forEach(s1 => (SEGMENT1_TO_DASH_SEGS[s1]||[]).forEach(s => segFromSeg1.add(s)));
+
  return {
- seg: segSel.length ? segSel : ALL_SEGMENTS.slice(),
+ seg: segEffective.filter(s => segFromSeg1.has(s)),
+ seg1: seg1Effective,
  ch: chSel.length ? chSel : ALL_CHANNELS.slice(),
  month: monthVal === "all" ? "all" : parseInt(monthVal, 10),
  dateFrom: dateFrom || null,
@@ -1573,8 +1598,9 @@ function clearDateRange(){
  onDateRangeChange();
 }
 
+const DROPDOWN_PANEL_ID = { segFilterWrap:"segFilterPanel", seg1FilterWrap:"seg1FilterPanel", chFilterWrap:"chFilterPanel" };
 function toggleDropdown(wrapId){
- const panel = document.getElementById(wrapId === "segFilterWrap" ? "segFilterPanel" : "chFilterPanel");
+ const panel = document.getElementById(DROPDOWN_PANEL_ID[wrapId]);
  const isOpen = panel.classList.contains("open");
  document.querySelectorAll(".msdrop-panel").forEach(p => p.classList.remove("open"));
  if (!isOpen) panel.classList.add("open");
@@ -1591,17 +1617,19 @@ function updateDropdownLabel(wrapId, panelId, allValues, allLabel){
 }
 function onMultiFilterChange(){
  updateDropdownLabel("segFilterWrap", "segFilterPanel", ALL_SEGMENTS, "Semua Segmen");
+ updateDropdownLabel("seg1FilterWrap", "seg1FilterPanel", ALL_SEGMENT1, "Semua Segment 1");
  updateDropdownLabel("chFilterWrap", "chFilterPanel", ALL_CHANNELS, "Semua Channel");
  saveFilters();
  loadLiveData();
 }
 
-// Simpan & pulihkan pilihan filter (Segmen/Channel/Bulan) lewat localStorage, supaya tetap kepilih
-// walaupun halaman di-reload penuh (browser refresh) atau dibuka lagi nanti.
+// Simpan & pulihkan pilihan filter (Segmen/Segment 1/Channel/Bulan) lewat localStorage, supaya
+// tetap kepilih walaupun halaman di-reload penuh (browser refresh) atau dibuka lagi nanti.
 function saveFilters(){
  try {
  localStorage.setItem("crmDashboardFilters", JSON.stringify({
  seg: checkedValues("segFilterPanel"),
+ seg1: checkedValues("seg1FilterPanel"),
  ch: checkedValues("chFilterPanel"),
  month: document.getElementById("monthFilter").value,
  dateFrom: document.getElementById("dateFrom").value,
@@ -1617,6 +1645,9 @@ function restoreFilters(){
  if (Array.isArray(f.seg)) {
  document.querySelectorAll("#segFilterPanel input[type=checkbox]").forEach(el => { el.checked = f.seg.includes(el.value); });
  }
+ if (Array.isArray(f.seg1)) {
+ document.querySelectorAll("#seg1FilterPanel input[type=checkbox]").forEach(el => { el.checked = f.seg1.includes(el.value); });
+ }
  if (Array.isArray(f.ch)) {
  document.querySelectorAll("#chFilterPanel input[type=checkbox]").forEach(el => { el.checked = f.ch.includes(el.value); });
  }
@@ -1624,6 +1655,7 @@ function restoreFilters(){
  if (f.dateFrom) document.getElementById("dateFrom").value = f.dateFrom;
  if (f.dateTo) document.getElementById("dateTo").value = f.dateTo;
  updateDropdownLabel("segFilterWrap", "segFilterPanel", ALL_SEGMENTS, "Semua Segmen");
+ updateDropdownLabel("seg1FilterWrap", "seg1FilterPanel", ALL_SEGMENT1, "Semua Segment 1");
  updateDropdownLabel("chFilterWrap", "chFilterPanel", ALL_CHANNELS, "Semua Channel");
  } catch (e) { /* abaikan kalau data tersimpan rusak/tidak valid */ }
 }
@@ -2378,8 +2410,22 @@ function buildDailyRateSeries(bySegChDate, segArr, chArr){
 function renderDailyRateCharts(f){
  const segList = segs(f.seg);
  const chList = chans(f.ch).filter(ch => ["WhatsApp","Email","Push"].includes(ch));
+
+ // ---- Period to show: custom date range takes priority; otherwise the Bulan filter restricts to
+ // just that month; "Semua Bulan" (and no custom range) shows the full Jan-Jul history. ----
+ let periodFrom = f.dateFrom, periodTo = f.dateTo, periodLabel = "";
+ if (!periodFrom && !periodTo && f.month !== "all") {
+ const monthNum = f.month + 1; // f.month is 0-based (Jan=0)
+ const total = daysInMonth(2026, monthNum);
+ periodFrom = `2026-${String(monthNum).padStart(2,'0')}-01`;
+ periodTo = `2026-${String(monthNum).padStart(2,'0')}-${String(total).padStart(2,'0')}`;
+ periodLabel = ` - Bulan: ${MONTHS[f.month]}`;
+ } else if (periodFrom && periodTo) {
+ periodLabel = ` - ${periodFrom.split('-').reverse().join('/')} s.d. ${periodTo.split('-').reverse().join('/')}`;
+ }
+
  document.getElementById("dailyRateCap").textContent =
- `Dari Daily Upper Funnel${segCapText(segList)}${chCapText(chList.length ? chList : ["WhatsApp","Email","Push"])} - Sales AI tidak berlaku di sini (tidak dikirim lewat Upper Funnel)`;
+ `Dari Daily Upper Funnel${segCapText(segList)}${chCapText(chList.length ? chList : ["WhatsApp","Email","Push"])}${periodLabel} - Sales AI tidak berlaku di sini (tidak dikirim lewat Upper Funnel)`;
 
  ["dailyDeliveryRateChart","dailyReadRateChart","dailyClickRateChart"].forEach(id => {
  if (charts[id]) { charts[id].destroy(); delete charts[id]; }
@@ -2395,9 +2441,17 @@ function renderDailyRateCharts(f){
  return;
  }
 
- const { dates, perChannel } = buildDailyRateSeries(UPPER_FORECAST_SOURCE.bySegChDate, segList, chList);
+ let { dates, perChannel } = buildDailyRateSeries(UPPER_FORECAST_SOURCE.bySegChDate, segList, chList);
+ if (periodFrom && periodTo) {
+ const keepIdx = [];
+ dates.forEach((d, i) => { if (d >= periodFrom && d <= periodTo) keepIdx.push(i); });
+ dates = keepIdx.map(i => dates[i]);
+ const filteredPerChannel = {};
+ chList.forEach(ch => { filteredPerChannel[ch] = keepIdx.map(i => perChannel[ch][i]); });
+ perChannel = filteredPerChannel;
+ }
  if (!dates.length) {
- noteEl.innerHTML = `<p class="note">Tidak ada data harian untuk kombinasi filter ini.</p>`;
+ noteEl.innerHTML = `<p class="note">Tidak ada data harian untuk kombinasi filter ini${periodLabel ? ' pada periode yang dipilih' : ''}.</p>`;
  return;
  }
  const labels = dates.map(d => d.slice(8,10) + "/" + d.slice(5,7));
@@ -2431,8 +2485,8 @@ function renderDailyRateCharts(f){
  makeChart("dailyReadRateChart", "readRate");
  makeChart("dailyClickRateChart", "clickRate");
 
- const missingDaysNote = dates.length < 30
- ? ` Data harian saat ini cuma mencakup ${dates.length} hari (Juli sebagian besar belum ada karena "Segmen 1" di Daily Upper Funnel masih kosong untuk bulan itu - lihat Debug panel).`
+ const missingDaysNote = (!periodLabel && dates.length < 150)
+ ? ` Data harian saat ini cuma mencakup ${dates.length} hari (Juli belum ada karena "Segmen 1" di Daily Upper Funnel masih kosong untuk bulan itu - lihat Debug panel).`
  : '';
  noteEl.innerHTML = `<p class="note">Titik yang terputus/kosong = tidak ada baris Sent untuk hari itu di kombinasi filter ini.${missingDaysNote}</p>`;
 }
