@@ -173,7 +173,6 @@
  <label><input type="checkbox" value="Repeat" checked onchange="onMultiFilterChange()"> Repeat</label>
  <label><input type="checkbox" value="TopUp" checked onchange="onMultiFilterChange()"> TopUp</label>
  <label><input type="checkbox" value="LMT" checked onchange="onMultiFilterChange()"> LMT</label>
- <label><input type="checkbox" value="SL" checked onchange="onMultiFilterChange()"> SL</label>
  </div>
  </div>
  <div class="msdrop filter-group" id="chFilterWrap">
@@ -184,8 +183,6 @@
  <label><input type="checkbox" value="Email" checked onchange="onMultiFilterChange()"> Email</label>
  <label><input type="checkbox" value="Push" checked onchange="onMultiFilterChange()"> Push Notification</label>
  <label><input type="checkbox" value="SalesAI" checked onchange="onMultiFilterChange()"> Sales AI</label>
- <label><input type="checkbox" value="SMS" checked onchange="onMultiFilterChange()"> SMS</label>
- <label><input type="checkbox" value="OnSite" checked onchange="onMultiFilterChange()"> On-site Messaging</label>
  </div>
  </div>
  <div class="filter-group">
@@ -380,24 +377,22 @@
 <script>
 const BLUE = "#0083AF", BLUE_DARK = "#005F80", TEAL = "#00A9A0", LIME = "#B4D700";
 const GOOD = "#2F7D4F", BAD = "#B0342A", WARN = "#B4571F", MUTED = "#6B7A82";
-const SEG_COLORS = { "New": "#2B5A86", "Repeat": "#2F7D4F", "TopUp": "#4C8C6B", "LMT": "#9C3F57", "SL": "#8B5FBF" };
-const ALL_SEGMENTS = ["New","Repeat","TopUp","LMT","SL"];
-const ALL_CHANNELS = ["WhatsApp","Email","Push","SalesAI","SMS","OnSite"];
-const CH_DISPLAY = { "WhatsApp":"WhatsApp", "Email":"Email", "Push":"Push Notification", "SalesAI":"Sales AI", "SMS":"SMS", "OnSite":"On-site Messaging" };
-const CH_COLOR = { WhatsApp: "#0083AF", Email: "#00A9A0", Push: "#B4D700", SalesAI: "#9C3F57", SMS: "#B4571F", OnSite: "#6B7A82" };
+const SEG_COLORS = { "New": "#2B5A86", "Repeat": "#2F7D4F", "TopUp": "#4C8C6B", "LMT": "#9C3F57" };
+const ALL_SEGMENTS = ["New","Repeat","TopUp","LMT"];
+const ALL_CHANNELS = ["WhatsApp","Email","Push","SalesAI"];
+const CH_DISPLAY = { "WhatsApp":"WhatsApp", "Email":"Email", "Push":"Push Notification", "SalesAI":"Sales AI" };
+const CH_COLOR = { WhatsApp: "#0083AF", Email: "#00A9A0", Push: "#B4D700", SalesAI: "#9C3F57" };
 // Segmen dengan data Cost Detail & Upper Funnel (Sent/Delivered/Click, CPA, Cost). Sheet sumbernya
 // belum dipecah per segmen granular - "Repeat" & "TopUp" masih berbagi satu blok gabungan
-// "Repeat + Top Up", dan "SL" sama sekali tidak ada di kedua sheet ini.
-const COST_SOURCE_SEG = { "New":"New", "Repeat":"Repeat+TopUp", "TopUp":"Repeat+TopUp", "LMT":"LMT", "SL": null };
+// "Repeat + Top Up".
+const COST_SOURCE_SEG = { "New":"New", "Repeat":"Repeat+TopUp", "TopUp":"Repeat+TopUp", "LMT":"LMT" };
 // Per-segment analysis focus, as specified by the user: New cares about Created/Eligible/Paid Out
-// Amount; Repeat, TopUp and LMT care about Created/Paid Out/Paid Out Amount. SL has no stated rule -
-// defaulted to the same set as Repeat/TopUp/LMT (the majority pattern) until told otherwise.
+// Amount; Repeat, TopUp and LMT care about Created/Paid Out/Paid Out Amount.
 const SEGMENT_FOCUS_METRICS = {
  "New": ["created","eligible","paidOutAmount"],
  "Repeat": ["created","paidOut","paidOutAmount"],
  "TopUp": ["created","paidOut","paidOutAmount"],
  "LMT": ["created","paidOut","paidOutAmount"],
- "SL": ["created","paidOut","paidOutAmount"],
 };
 const METRIC_LABEL = { created:"Created", afterFF:"After FF", eligible:"Eligible", accepted:"Accepted", paidOut:"Paid Out", paidOutAmount:"Paid Out Amount" };
 const METRIC_IS_CURRENCY = { paidOutAmount: true };
@@ -516,14 +511,13 @@ const WA_STATS_FALLBACK = {
  "Repeat+TopUp": { poolConvRate: 3232/321127, lastMonthWaBudget: 213264345, poCreatedRatio: 3936/7556 },
 };
 
-// ---- Expand legacy 3-segment fallback objects ("New"/"Repeat+TopUp"/"LMT") to the new
-// 5-segment key set. This is only ever used when the live fetch fails entirely (offline
-// safety net), so an approximate split (Repeat & TopUp both cloned from the old combined
-// figure, SL zeroed out) is acceptable here - it is never shown when live data is available.
+// ---- Expand legacy 3-segment fallback objects ("New"/"Repeat+TopUp"/"LMT") to the current
+// 4-segment key set. This is only ever used when the live fetch fails entirely (offline safety
+// net), so an approximate split (Repeat & TopUp both cloned from the old combined figure) is
+// acceptable here - it is never shown when live data is available.
 function expandLegacySegKeys(obj, zeroTemplateFn){
  const out = {};
  ALL_SEGMENTS.forEach(seg => {
- if (seg === "SL") { out[seg] = zeroTemplateFn ? zeroTemplateFn() : null; return; }
  if (seg === "Repeat" || seg === "TopUp") { out[seg] = obj["Repeat+TopUp"]; return; }
  out[seg] = obj[seg];
  });
@@ -620,8 +614,8 @@ function costVal(costRows, costIdx, seg, type, month){
 // Date | Segment | Geo | Channel Attribute Logic | Created Apps | After First Filter | Eligible |
 // Accepted Apps | Paid Out | Paid Out Amount | Month. If "Month" itself is missing, it's derived
 // from "Created Date" instead (which is required) - so removing just the Month column is safe.
-const RAW_SEG_TO_DASH_SEG = { "New":"New", "Repeat":"Repeat", "TopUp":"TopUp", "LMT":"LMT", "SL":"SL" };
-const RAW_CH_TO_DASH_CH = { "WhatsApp":"WhatsApp", "Email":"Email", "Push Notification":"Push", "Sales AI":"SalesAI", "SMS":"SMS" };
+const RAW_SEG_TO_DASH_SEG = { "New":"New", "Repeat":"Repeat", "TopUp":"TopUp", "LMT":"LMT" };
+const RAW_CH_TO_DASH_CH = { "WhatsApp":"WhatsApp", "Email":"Email", "Push Notification":"Push", "Sales AI":"SalesAI" };
 
 // Finds the header row (anchored on a column literally titled "No") and resolves each requested
 // column key to its 1-indexed position by matching header text (case-insensitive, trimmed).
@@ -648,6 +642,26 @@ function valAtCol(rows, row0, col1){ return col1 == null ? null : valAt(rows, ro
 
 const LOWER_LOG_LABELS = { date:"Created Date", segment:"Segment", channel:"Channel Attribute Logic", created:"Created Apps", afterFF:"After First Filter", eligible:"Eligible", accepted:"Accepted Apps", paidOut:"Paid Out", paidOutAmount:"Paid Out Amount", month:"Month" };
 
+// Shared date parser for both Created Date (Lower Funnel) and Sent Date (Upper Funnel). Sheet
+// convention (confirmed by the user) is DD-MM-YYYY - day first - for any slash/dash separated date.
+// ISO "YYYY-MM-DD" (or "YYYY/MM/DD") is also accepted since most of the sheet already exports that
+// way. Returns a normalized "YYYY-MM-DD" string, or null if the text doesn't match either shape.
+function parseDateFlexible(raw){
+ if (!raw) return null;
+ const s = String(raw).trim();
+ const iso = s.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/);
+ if (iso) {
+ const y = iso[1], mo = parseInt(iso[2],10), d = parseInt(iso[3],10);
+ if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) return `${y}-${String(mo).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+ }
+ const dmy = s.match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})/);
+ if (dmy) {
+ const d = parseInt(dmy[1],10), mo = parseInt(dmy[2],10), y = dmy[3];
+ if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) return `${y}-${String(mo).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+ }
+ return null;
+}
+
 function parseLowerFunnelLog(rows){
  const { dataStart, col, missing } = resolveColumnsByHeader(rows, LOWER_LOG_LABELS);
  const bySeg = {}, bySegCh = {};
@@ -671,8 +685,7 @@ function parseLowerFunnelLog(rows){
  const seg = RAW_SEG_TO_DASH_SEG[rawSeg];
  if (!seg) { unrecognizedSeg[rawSeg] = (unrecognizedSeg[rawSeg]||0) + 1; continue; }
  const rawDateCell = cellAtCol(rows, i, col.date);
- const dateMatch = rawDateCell.match(/^(\d{4})[-\/](\d{2})[-\/](\d{2})/); // accepts "2026-07-27" or "2026/07/27", tolerates trailing time/whitespace
- const dateStr = dateMatch ? `${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}` : null; // normalized to YYYY-MM-DD regardless of source separator, since this is used as a dict key and compared lexicographically for maxDate
+ const dateStr = parseDateFlexible(rawDateCell);
  if (!dateStr && rawDateCell) { dateParseFailCount++; if (dateParseFailSamples.length < 5) dateParseFailSamples.push(rawDateCell); }
  let month = monthColMissing ? null : parseInt(cellAtCol(rows, i, col.month), 10);
  if ((!month || month < 1 || month > 12) && dateStr) month = parseInt(dateStr.slice(5,7), 10);
@@ -717,53 +730,34 @@ function parseLowerFunnelLog(rows){
 // Click | Delivery Rate | Read Rate | Click Rate | Month.
 //
 // "Segmen 1" (already-cleaned segment) is trusted over the raw "Segmen" audience-tag column, and
-// mapped to the dashboard's 5 segments. "Channel" is mapped from the sheet's real channel names
-// (Whatsapp/Email/Push Android/Push iOS/Push/SMS/On-site Messaging) to the dashboard's channel set
-// - Push Android, Push iOS and the generic "Push" all roll up into the dashboard's single "Push"
-// bucket (matches how the dashboard already treats push channels elsewhere); SMS and On-site
-// Messaging are new enough volume that they get their own dashboard channels rather than being
-// folded into something else.
+// mapped to the dashboard's 4 in-scope segments (New/Repeat/TopUp/LMT - per user instruction,
+// anything else in the sheet, e.g. "Lainnya" or a blank cell, is logged and skipped). "Channel" is
+// mapped to the dashboard's 4 in-scope channels (WhatsApp/Email/Push/Sales AI, per user
+// instruction) - Push Android, Push iOS and the generic "Push" all roll up into the dashboard's
+// single "Push" bucket; any other channel value in the sheet (e.g. SMS, On-site Messaging) is
+// logged and skipped, not shown anywhere in the dashboard.
 //
-// "Month" (explicit, already-validated column) is trusted over "Sent Date" for MONTHLY bucketing -
-// a live check on this sheet found "Sent Date" is inconsistently stored: some rows are genuine
-// Sheets dates (locale-ambiguous on export - day<=12 rows can silently swap day/month), other rows
-// are plain text already fixed to "DD/MM/YYYY" (only for day>12, where the format is unambiguous
-// either way). For DAILY-level use (forecast-style time series), only the day>12 rows can be
-// trusted; day<=12 rows are excluded rather than risking a silently wrong date - see
-// dateAmbiguousCount/dateAmbiguousSamples below. Monthly totals are unaffected by any of this since
-// they come from the explicit Month column, never from Sent Date.
+// "Sent Date" is the message-send date (as opposed to "Created Date" in Lower Funnel, which is the
+// date the user submitted their loan application) - same DD-MM-YYYY sheet convention, parsed with
+// the same parseDateFlexible used for Lower Funnel. "Month" (explicit column) is still preferred
+// for MONTHLY bucketing when present, since it's manually validated and doesn't depend on date
+// parsing at all - Sent Date is only relied on for daily-level views (Forecast-style time series,
+// Rentang Tanggal Custom).
 const UPPER_LOG_LABELS = { sentDate:"Sent Date", segment1:"Segmen 1", channel:"Channel", sent:"Sent", delivered:"Delivered", read:"Read", click:"Click", month:"Month" };
-const UPPER_SEG1_TO_DASH = { "New":"New", "Repeat":"Repeat", "LMT":"LMT", "Top Up PDF":"TopUp" }; // "Lainnya" and anything else = unrecognized (logged, not silently dropped)
-const UPPER_RAW_CH_TO_DASH_CH = { "Whatsapp":"WhatsApp", "Email":"Email", "Push Android":"Push", "Push iOS":"Push", "Push":"Push", "SMS":"SMS", "On-site Messaging":"OnSite" };
-
-// Parses a "Sent Date" cell only when it is UNAMBIGUOUS: either ISO "YYYY-MM-DD" (always safe), or
-// "D/M/YYYY" / "DD/MM/YYYY" where the day component is >12 (the only way to be certain which
-// number is the day vs the month without knowing the cell's original locale). Returns null - not a
-// guess - for anything else, including a well-formed-looking "DD/MM/YYYY" with day<=12.
-function parseUnambiguousDate(raw){
- if (!raw) return null;
- const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
- if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
- const slash = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
- if (slash) {
- const a = parseInt(slash[1],10), b = parseInt(slash[2],10), y = slash[3];
- if (a > 12 && b <= 12) return `${y}-${String(b).padStart(2,'0')}-${String(a).padStart(2,'0')}`; // DD/MM/YYYY, day unambiguous
- if (b > 12 && a <= 12) return `${y}-${String(a).padStart(2,'0')}-${String(b).padStart(2,'0')}`; // MM/DD/YYYY, day unambiguous
- }
- return null; // both components <=12 (or unrecognized format) - genuinely ambiguous, don't guess
-}
+const UPPER_SEG1_TO_DASH = { "New":"New", "Repeat":"Repeat", "LMT":"LMT", "Top Up PDF":"TopUp" }; // anything else (e.g. "Lainnya", blank) = unrecognized (logged, not silently dropped)
+const UPPER_RAW_CH_TO_DASH_CH = { "Whatsapp":"WhatsApp", "Email":"Email", "Push Android":"Push", "Push iOS":"Push", "Push":"Push" }; // SMS / On-site Messaging intentionally out of scope, see note above
 
 function parseUpperFunnelLog(rows){
  const { dataStart, col, missing } = resolveColumnsByHeader(rows, UPPER_LOG_LABELS);
- const bySeg = {}; // bySeg[seg][month] = { sent, delivered, read, click, rows } - all channels combined
+ const bySeg = {}; // bySeg[seg][month] = { sent, delivered, read, click, rows } - all in-scope channels combined
  const bySegCh = {}; // bySegCh[seg][ch][month] = { sent, delivered, read, click }
- const bySegChDate = {}; // bySegChDate[seg][ch]["YYYY-MM-DD"] = { sent, delivered, read, click } - only for unambiguous dates (see parseUnambiguousDate)
+ const bySegChDate = {}; // bySegChDate[seg][ch]["YYYY-MM-DD"] = { sent, delivered, read, click }
  const zero = () => ({ sent:0, delivered:0, read:0, click:0, rows:0 });
  const unrecognizedSeg1 = {};
  const unrecognizedChannel = {};
  let maxDate = null;
- let dateAmbiguousCount = 0;
- const dateAmbiguousSamples = [];
+ let dateParseFailCount = 0;
+ const dateParseFailSamples = [];
  const monthColMissing = col.month == null;
  for (let i = dataStart; i < rows.length; i++) {
  const raw1 = cellAtCol(rows, i, col.segment1);
@@ -771,7 +765,11 @@ function parseUpperFunnelLog(rows){
  const seg = UPPER_SEG1_TO_DASH[raw1];
  if (!seg) { unrecognizedSeg1[raw1] = (unrecognizedSeg1[raw1]||0) + 1; continue; }
  let month = monthColMissing ? null : parseInt(cellAtCol(rows, i, col.month), 10);
- if (!month || month < 1 || month > 12) continue; // Sent Date is untrustworthy for this (see note above) - skip rather than guess
+ const rawDate = cellAtCol(rows, i, col.sentDate);
+ const dateStr = parseDateFlexible(rawDate);
+ if (!dateStr && rawDate) { dateParseFailCount++; if (dateParseFailSamples.length < 5) dateParseFailSamples.push(rawDate); }
+ if ((!month || month < 1 || month > 12) && dateStr) month = parseInt(dateStr.slice(5,7), 10);
+ if (!month || month < 1 || month > 12) continue;
  const v = {
  sent: valAtCol(rows, i, col.sent) || 0,
  delivered: valAtCol(rows, i, col.delivered) || 0,
@@ -792,9 +790,7 @@ function parseUpperFunnelLog(rows){
  Object.keys(v).forEach(k => bySegCh[seg][ch][month][k] += v[k]);
  bySegCh[seg][ch][month].rows++;
 
- const rawDate = cellAtCol(rows, i, col.sentDate);
- const dateStr = parseUnambiguousDate(rawDate);
- if (!dateStr) { if (rawDate) { dateAmbiguousCount++; if (dateAmbiguousSamples.length < 5) dateAmbiguousSamples.push(rawDate); } continue; }
+ if (!dateStr) continue;
  bySegChDate[seg] = bySegChDate[seg] || {};
  bySegChDate[seg][ch] = bySegChDate[seg][ch] || {};
  bySegChDate[seg][ch][dateStr] = bySegChDate[seg][ch][dateStr] || { sent:0, delivered:0, read:0, click:0 };
@@ -804,7 +800,7 @@ function parseUpperFunnelLog(rows){
  bySegChDate[seg][ch][dateStr].click += v.click;
  if (!maxDate || dateStr > maxDate) maxDate = dateStr;
  }
- return { bySeg, bySegCh, bySegChDate, maxDate, unrecognizedSeg1, unrecognizedChannel, missingColumns: missing, totalRowsRead: rows.length - dataStart, dateAmbiguousCount, dateAmbiguousSamples };
+ return { bySeg, bySegCh, bySegChDate, maxDate, unrecognizedSeg1, unrecognizedChannel, missingColumns: missing, totalRowsRead: rows.length - dataStart, dateParseFailCount, dateParseFailSamples };
 }
 function upperLogVal(agg, seg, metric, month){
  const s = agg[seg]; if (!s || !s[month]) return null;
@@ -1070,7 +1066,7 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  const SEGS = ALL_SEGMENTS;
  const costIdx = buildCostIndex(costRows);
  const { bySeg: lowerAgg, bySegCh: lowerAggCh, bySegChDate, maxDate, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples } = parseLowerFunnelLog(lowerRows);
- const { bySeg: upperAgg, bySegCh: upperAggCh, bySegChDate: upperBySegChDate, maxDate: upperMaxDate, unrecognizedSeg1: upperUnrecognizedSeg1, unrecognizedChannel: upperUnrecognizedChannel, missingColumns: upperMissingColumns, dateAmbiguousCount, dateAmbiguousSamples } = parseUpperFunnelLog(upperRows);
+ const { bySeg: upperAgg, bySegCh: upperAggCh, bySegChDate: upperBySegChDate, maxDate: upperMaxDate, unrecognizedSeg1: upperUnrecognizedSeg1, unrecognizedChannel: upperUnrecognizedChannel, missingColumns: upperMissingColumns, dateParseFailCount: upperDateParseFailCount, dateParseFailSamples: upperDateParseFailSamples } = parseUpperFunnelLog(upperRows);
  const targetAgg = parseTargetLog(targetRows);
 
  const trend = {}, cost = {}, cpa = {}, poAmountCost = {}, budgetAug = {};
@@ -1137,8 +1133,8 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  WhatsApp: [1,2,3,4,5,6,7].map(m => costVal(costRows, costIdx, srcSeg, "WhatsApp", m)),
  Email: [1,2,3,4,5,6,7].map(m => costVal(costRows, costIdx, srcSeg, "Email", m)),
  Push: [0,0,0,0,0,0,0],
- SalesAI: null, SMS: null, OnSite: null,
- } : { WhatsApp:null, Email:null, Push:null, SalesAI:null, SMS:null, OnSite:null };
+ SalesAI: null,
+ } : { WhatsApp:null, Email:null, Push:null, SalesAI:null };
 
  // ---- CPA Jun/Jul (needs a cost source; null when unavailable, e.g. SL) ----
  const poJun = lowerLogVal(lowerAgg, seg, "paidOut", 6), poJul = lowerLogVal(lowerAgg, seg, "paidOut", 7);
@@ -1225,7 +1221,7 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  forecastSource: { bySegChDate, maxDate },
  upperForecastSource: { bySegChDate: upperBySegChDate, maxDate: upperMaxDate },
  targetAgg,
- debug: { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, upperAgg, upperAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, upperUnrecognizedSeg1, upperUnrecognizedChannel, upperMissingColumns, dateAmbiguousCount, dateAmbiguousSamples, costIdx } };
+ debug: { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, upperAgg, upperAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, upperUnrecognizedSeg1, upperUnrecognizedChannel, upperMissingColumns, upperDateParseFailCount, upperDateParseFailSamples, costIdx } };
 }
 
 // ===================== DEBUG PANEL (self-diagnosis, no DevTools needed) =====================
@@ -1237,7 +1233,7 @@ function renderDebugPanel(){
  const el = document.getElementById("debugPanelBody");
  if (!el) return;
  if (!LAST_DEBUG) { el.innerHTML = `<p class='note'>Belum ada data live (masih pakai fallback/cache) - debug panel hanya aktif setelah fetch live berhasil.</p>`; return; }
- const { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, upperAgg, upperAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, upperUnrecognizedSeg1, upperUnrecognizedChannel, upperMissingColumns, dateAmbiguousCount, dateAmbiguousSamples, costIdx } = LAST_DEBUG;
+ const { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, upperAgg, upperAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, upperUnrecognizedSeg1, upperUnrecognizedChannel, upperMissingColumns, upperDateParseFailCount, upperDateParseFailSamples, costIdx } = LAST_DEBUG;
  let html = "";
 
  if (dateParseFailCount > 0) {
@@ -1254,27 +1250,26 @@ function renderDebugPanel(){
 
  const unrecChKeys = Object.keys(unrecognizedChannel || {});
  if (unrecChKeys.length) {
- html += `<div class='balert-msg bad' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[ALERT]</span><div><b>Nilai Channel tidak dikenali di Lower Funnel log:</b> ${unrecChKeys.map(k=>`"${k}" (${unrecognizedChannel[k]} baris)`).join(', ')} - kode cuma kenal persis "WhatsApp", "Email", "Push Notification", "Sales AI", "SMS". Baris dengan channel di luar itu TETAP kehitung di KPI/Trend (level segmen), tapi HILANG dari Forecast &amp; breakdown per-channel.</div></div>`;
+ html += `<div class='balert-msg info' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[INFO]</span><div><b>Channel di luar cakupan (sengaja diabaikan) di Lower Funnel log:</b> ${unrecChKeys.map(k=>`"${k}" (${unrecognizedChannel[k]} baris)`).join(', ')} - dashboard cuma menghitung WhatsApp/Email/Push Notification/Sales AI sesuai arahan. Baris ini TETAP kehitung di KPI/Trend level segmen, tapi tidak masuk breakdown per-channel.</div></div>`;
  }
 
  const unrecUpperChKeys = Object.keys(upperUnrecognizedChannel || {});
  if (unrecUpperChKeys.length) {
- html += `<div class='balert-msg warn' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[WARNING]</span><div><b>Nilai Channel tidak dikenali di Daily Upper Funnel log:</b> ${unrecUpperChKeys.map(k=>`"${k}" (${upperUnrecognizedChannel[k]} baris)`).join(', ')} - kode kenal "Whatsapp", "Email", "Push Android", "Push iOS", "Push", "SMS", "On-site Messaging". Baris dengan channel di luar itu TETAP kehitung di total Segmen bulanan, tapi HILANG dari breakdown per-channel (Channel Detail/Engagement/CPC).</div></div>`;
+ html += `<div class='balert-msg info' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[INFO]</span><div><b>Channel di luar cakupan (sengaja diabaikan) di Daily Upper Funnel log:</b> ${unrecUpperChKeys.map(k=>`"${k}" (${upperUnrecognizedChannel[k]} baris)`).join(', ')} - dashboard cuma menghitung Whatsapp/Email/Push Android/Push iOS/Push sesuai arahan. Baris ini tidak masuk perhitungan manapun di dashboard.</div></div>`;
  }
 
  const unrecKeys = Object.keys(unrecognizedSeg || {});
  if (unrecKeys.length) {
- html += `<div class='balert-msg warn' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[WARNING]</span><div><b>Nilai Segment tidak dikenali di Lower Funnel log:</b> ${unrecKeys.map(k=>`"${k}" (${unrecognizedSeg[k]} baris)`).join(', ')} - baris ini di-skip, tidak ikut terhitung di manapun.</div></div>`;
+ html += `<div class='balert-msg info' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[INFO]</span><div><b>Segmen di luar cakupan (sengaja diabaikan) di Lower Funnel log:</b> ${unrecKeys.map(k=>`"${k}" (${unrecognizedSeg[k]} baris)`).join(', ')} - dashboard cuma menghitung New/Repeat/TopUp/LMT sesuai arahan. Baris ini di-skip, tidak ikut terhitung di manapun.</div></div>`;
  }
 
  const unrecSeg1Keys = Object.keys(upperUnrecognizedSeg1 || {});
  if (unrecSeg1Keys.length) {
- html += `<div class='balert-msg warn' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[WARNING]</span><div><b>Nilai "Segmen 1" tidak dikenali di Daily Upper Funnel log:</b> ${unrecSeg1Keys.map(k=>`"${k}" (${upperUnrecognizedSeg1[k]} baris)`).join(', ')} - kode cuma kenal "New", "Repeat", "LMT", "Top Up PDF". Baris ini di-skip sepenuhnya (tidak masuk Sent/Delivered/Read/Click manapun).</div></div>`;
+ html += `<div class='balert-msg info' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[INFO]</span><div><b>Nilai "Segmen 1" di luar cakupan (sengaja diabaikan) di Daily Upper Funnel log:</b> ${unrecSeg1Keys.map(k=>`"${k}" (${upperUnrecognizedSeg1[k]} baris)`).join(', ')} - dashboard cuma menghitung "New", "Repeat", "LMT", "Top Up PDF". Baris ini di-skip sepenuhnya (tidak masuk Sent/Delivered/Read/Click manapun).</div></div>`;
  }
 
- if (dateAmbiguousCount > 0) {
- const pctAmbig = upperRows.length ? (dateAmbiguousCount / (upperRows.length-1) * 100) : 0;
- html += `<div class='balert-msg warn' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[WARNING]</span><div><b>${nf(dateAmbiguousCount)} baris (~${pctAmbig.toFixed(0)}%) di Daily Upper Funnel punya "Sent Date" yang tanggalnya AMBIGU</b> (tanggal 1-12, di mana hari & bulan nggak bisa dipastikan mana yang mana dari formatnya) - contoh nilai mentah: ${dateAmbiguousSamples.map(s=>`"${s}"`).join(', ')}. Baris ini TETAP kehitung penuh di semua angka BULANAN (Sent/Delivered/Read/Click per bulan, semua chart & tabel di atas), karena itu pakai kolom "Month" yang eksplisit &amp; sudah tervalidasi - bukan dari Sent Date. Tapi baris ini TIDAK ikut di fitur harian (Engagement di section "Rentang Tanggal Custom") karena engine sengaja menolak menebak tanggal yang ambigu, supaya nggak salah taruh di hari yang salah. <b>Cara permanen memperbaiki ini:</b> format ulang seluruh kolom "Sent Date" di sheet sebagai teks eksplisit "DD/MM/YYYY" (sama seperti sebagian baris yang sudah benar, misal "13/01/2026") - begitu semua baris konsisten, seluruh histori harian otomatis ikut terhitung.</div></div>`;
+ if (upperDateParseFailCount > 0) {
+ html += `<div class='balert-msg warn' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[WARNING]</span><div><b>${nf(upperDateParseFailCount)} baris gagal dibaca tanggalnya di kolom Sent Date</b> (harus format DD-MM-YYYY, misal 27-07-2026) - contoh nilai mentah yang gagal: ${upperDateParseFailSamples.map(s=>`"${s}"`).join(', ')}. Baris ini TETAP kehitung penuh di semua angka BULANAN (pakai kolom "Month" yang eksplisit), tapi HILANG dari fitur harian (Engagement di section "Rentang Tanggal Custom").</div></div>`;
  }
 
  html += `<h4 style='font-size:12px;margin:14px 0 6px;'>Lower Funnel (log mentah, ${lowerRows.length} baris CSV) - Total per Segmen per Bulan</h4><table class='dt'><thead><tr><th>Segmen</th><th>Bulan</th><th class='num'>Jumlah baris</th><th class='num'>Created</th><th class='num'>After FF</th><th class='num'>Eligible</th><th class='num'>Accepted</th><th class='num'>Paid Out</th><th class='num'>Paid Out Amount</th></tr></thead><tbody>`;
@@ -2804,7 +2799,7 @@ function renderCostRatioTable(f){
 // ===================== BUDGET USAGE ALERT =====================
 function renderBudgetAlert(f){
  const list = costSegs(f.seg);
- document.getElementById("budgetAlertCap").textContent = list.length === ALL_SEGMENTS.filter(s=>COST_SOURCE_SEG[s]).length ? "Semua segmen (SL tidak punya data cost)" : `Segmen: ${list.join(', ') || '(tidak ada yang punya data cost)'}`;
+ document.getElementById("budgetAlertCap").textContent = list.length === ALL_SEGMENTS.filter(s=>COST_SOURCE_SEG[s]).length ? "Semua segmen" : `Segmen: ${list.join(', ') || '(tidak ada yang punya data cost)'}`;
 
  const used = list.reduce((s,seg)=> s + (AUG_COST[seg]||0), 0);
  const planned = list.reduce((s,seg)=> s + ((BUDGET_AUG[seg]&&BUDGET_AUG[seg].budgetBase)||0), 0);
