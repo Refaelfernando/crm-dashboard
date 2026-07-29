@@ -279,6 +279,20 @@
  </div>
  </section>
 
+ <!-- DAILY RATE PER CHANNEL -->
+ <section class="row" style="grid-template-columns:1fr;">
+ <div class="card">
+ <h3>Delivery Rate / Read Rate / Click Rate Harian per Channel</h3>
+ <div class="cap" id="dailyRateCap">Dari Daily Upper Funnel, mengikuti filter Segmen &amp; Channel</div>
+ <div class="row cols3" style="margin-bottom:0;">
+ <div><div class="note" style="text-align:center;margin:0 0 4px;font-weight:600;">Delivery Rate</div><div class="chart-box" style="height:220px;"><canvas id="dailyDeliveryRateChart"></canvas></div></div>
+ <div><div class="note" style="text-align:center;margin:0 0 4px;font-weight:600;">Read Rate</div><div class="chart-box" style="height:220px;"><canvas id="dailyReadRateChart"></canvas></div></div>
+ <div><div class="note" style="text-align:center;margin:0 0 4px;font-weight:600;">Click Rate (CTR)</div><div class="chart-box" style="height:220px;"><canvas id="dailyClickRateChart"></canvas></div></div>
+ </div>
+ <div id="dailyRateNote"></div>
+ </div>
+ </section>
+
  <!-- CHANNEL DETAIL TABLE -->
  <section class="row" style="grid-template-columns:1fr;">
  <div class="card">
@@ -810,6 +824,57 @@ function upperLogChVal(aggCh, seg, ch, metric, month){
  const s = aggCh[seg] && aggCh[seg][ch]; if (!s || !s[month]) return null;
  const v = s[month][metric]; return v == null ? null : v;
 }
+
+// ---- MONTHLY UPPER FUNNEL: a separate sheet, one row per (Month, raw audience tag, Channel)
+// combo, already aggregated to monthly totals (not daily) - "Sent Date" in this sheet is a
+// leftover/dummy field (always Jan 1-7 regardless of which month the row is for) and carries no
+// real date meaning here, so it's ignored entirely; "Month" is the only date field that matters.
+// Header differs slightly from Daily Upper Funnel: "Segment"/"Segment 1" (no "Segmen" wording) and
+// column order is different, but resolveColumnsByHeader matches by label text so order doesn't
+// matter. This sheet is the source for "Engagement per Channel - Jun vs Jul" and "Upper Funnel per
+// Channel" - it's used instead of Daily Upper Funnel there because Daily Upper Funnel's "Segmen 1"
+// is blank for the entire month of July (see debug panel), so any month-level view built from Daily
+// Upper Funnel loses July; Monthly Upper Funnel doesn't have that gap.
+const MONTHLY_LOG_LABELS = { channel:"Channel", segment1:"Segment 1", sent:"Sent", delivered:"Delivered", read:"Read", click:"Click", month:"Month" };
+
+function parseMonthlyUpperFunnelLog(rows){
+ const { dataStart, col, missing } = resolveColumnsByHeader(rows, MONTHLY_LOG_LABELS);
+ const bySeg = {}; // bySeg[seg][month] = { sent, delivered, read, click, rows } - in-scope channels combined
+ const bySegCh = {}; // bySegCh[seg][ch][month] = { sent, delivered, read, click, rows }
+ const zero = () => ({ sent:0, delivered:0, read:0, click:0, rows:0 });
+ const unrecognizedSeg1 = {};
+ const unrecognizedChannel = {};
+ const monthColMissing = col.month == null;
+ for (let i = dataStart; i < rows.length; i++) {
+ const raw1 = cellAtCol(rows, i, col.segment1);
+ if (!raw1) { unrecognizedSeg1["(kosong)"] = (unrecognizedSeg1["(kosong)"]||0) + 1; continue; }
+ const seg = UPPER_SEG1_TO_DASH[raw1];
+ if (!seg) { unrecognizedSeg1[raw1] = (unrecognizedSeg1[raw1]||0) + 1; continue; }
+ const month = monthColMissing ? null : parseInt(cellAtCol(rows, i, col.month), 10);
+ if (!month || month < 1 || month > 12) continue;
+ const v = {
+ sent: valAtCol(rows, i, col.sent) || 0,
+ delivered: valAtCol(rows, i, col.delivered) || 0,
+ read: valAtCol(rows, i, col.read) || 0,
+ click: valAtCol(rows, i, col.click) || 0,
+ };
+ bySeg[seg] = bySeg[seg] || {};
+ bySeg[seg][month] = bySeg[seg][month] || zero();
+ Object.keys(v).forEach(k => bySeg[seg][month][k] += v[k]);
+ bySeg[seg][month].rows++;
+
+ const rawCh = cellAtCol(rows, i, col.channel);
+ const ch = UPPER_RAW_CH_TO_DASH_CH[rawCh];
+ if (!ch) { if (rawCh) unrecognizedChannel[rawCh] = (unrecognizedChannel[rawCh]||0) + 1; continue; }
+ bySegCh[seg] = bySegCh[seg] || {};
+ bySegCh[seg][ch] = bySegCh[seg][ch] || {};
+ bySegCh[seg][ch][month] = bySegCh[seg][ch][month] || zero();
+ Object.keys(v).forEach(k => bySegCh[seg][ch][month][k] += v[k]);
+ bySegCh[seg][ch][month].rows++;
+ }
+ return { bySeg, bySegCh, unrecognizedSeg1, unrecognizedChannel, missingColumns: missing, totalRowsRead: rows.length - dataStart };
+}
+
 // Sums a daily-engagement metric across the given segments/channels for one date - mirrors
 // dailyValueForDate (Lower Funnel) but for Upper Funnel's sent/delivered/read/click.
 function dailyEngagementForDate(bySegChDate, segArr, chArr, dateStr, metric){
@@ -1062,11 +1127,12 @@ async function fetchSheetCSV(sheetName){
  return parsed.data;
 }
 
-function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
+function computeFromSheets(lowerRows, upperRows, monthlyUpperRows, costRows, targetRows){
  const SEGS = ALL_SEGMENTS;
  const costIdx = buildCostIndex(costRows);
  const { bySeg: lowerAgg, bySegCh: lowerAggCh, bySegChDate, maxDate, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples } = parseLowerFunnelLog(lowerRows);
  const { bySeg: upperAgg, bySegCh: upperAggCh, bySegChDate: upperBySegChDate, maxDate: upperMaxDate, unrecognizedSeg1: upperUnrecognizedSeg1, unrecognizedChannel: upperUnrecognizedChannel, missingColumns: upperMissingColumns, dateParseFailCount: upperDateParseFailCount, dateParseFailSamples: upperDateParseFailSamples } = parseUpperFunnelLog(upperRows);
+ const { bySeg: monthlyAgg, bySegCh: monthlyAggCh, unrecognizedSeg1: monthlyUnrecognizedSeg1, unrecognizedChannel: monthlyUnrecognizedChannel, missingColumns: monthlyMissingColumns } = parseMonthlyUpperFunnelLog(monthlyUpperRows);
  const targetAgg = parseTargetLog(targetRows);
 
  const trend = {}, cost = {}, cpa = {}, poAmountCost = {}, budgetAug = {};
@@ -1103,10 +1169,11 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  upperSegTotals[seg] = { sent: uSent, delivered: uDelivered, read: uRead, click: uClick };
 
  // ---- Channel detail: Created/Paid Out/Paid Out Amount from the Lower Funnel log per channel
- // (every segment & channel, including Sales AI and SL). Sent/Delivered/Click now come back from
- // Daily Upper Funnel's own Channel column - available wherever Upper Funnel tracks this segment
- // (New/Repeat/TopUp/LMT; not SL, and not for the SalesAI channel, since Upper Funnel doesn't cover
- // Sales AI sends).
+ // (every segment & channel, including Sales AI). Sent/Delivered/Click now come from Monthly Upper
+ // Funnel (not Daily Upper Funnel) - Daily Upper Funnel's "Segmen 1" is blank for all of July, so a
+ // month-level view built from it loses July entirely; Monthly Upper Funnel has complete monthly
+ // coverage. (Daily Upper Funnel is still used elsewhere for real daily-granularity views: Forecast,
+ // Rentang Tanggal Custom, and the new daily rate chart.)
  channelDetail[seg] = {};
  ALL_CHANNELS.forEach(ch => {
  const created=[], paidOut=[], paidOutAmount=[];
@@ -1116,9 +1183,9 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  created.push(chAgg ? chAgg.created : null);
  paidOut.push(chAgg ? chAgg.paidOut : null);
  paidOutAmount.push(chAgg ? chAgg.paidOutAmount : null);
- sent.push(upperLogChVal(upperAggCh, seg, ch, "sent", m));
- delivered.push(upperLogChVal(upperAggCh, seg, ch, "delivered", m));
- click.push(upperLogChVal(upperAggCh, seg, ch, "click", m));
+ sent.push(upperLogChVal(monthlyAggCh, seg, ch, "sent", m));
+ delivered.push(upperLogChVal(monthlyAggCh, seg, ch, "delivered", m));
+ click.push(upperLogChVal(monthlyAggCh, seg, ch, "click", m));
  }
  channelDetail[seg][ch] = {
  sent: sent.some(v=>v!=null) ? sent : null, delivered: delivered.some(v=>v!=null) ? delivered : null,
@@ -1156,13 +1223,13 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  budgetDownside: cpaSeg ? targetPO * (cpaSeg.jul != null ? cpaSeg.jul : cpaSeg.jun) : null,
  };
 
- // ---- Channel engagement Sent/Delivered/Click/Read (Open) Jun & Jul, back to per-channel now
- // that Daily Upper Funnel has a Channel column again ----
+ // ---- Channel engagement Sent/Delivered/Click/Read (Open) Jun & Jul - sourced from Monthly Upper
+ // Funnel (see channelDetail note above for why: Daily Upper Funnel is missing July entirely) ----
  channelEngage[seg] = {};
  ALL_CHANNELS.forEach(ch => {
  channelEngage[seg][ch] = {
- sentJun: upperLogChVal(upperAggCh, seg, ch, "sent", 6), deliveredJun: upperLogChVal(upperAggCh, seg, ch, "delivered", 6), clickJun: upperLogChVal(upperAggCh, seg, ch, "click", 6), openJun: upperLogChVal(upperAggCh, seg, ch, "read", 6),
- sentJul: upperLogChVal(upperAggCh, seg, ch, "sent", 7), deliveredJul: upperLogChVal(upperAggCh, seg, ch, "delivered", 7), clickJul: upperLogChVal(upperAggCh, seg, ch, "click", 7), openJul: upperLogChVal(upperAggCh, seg, ch, "read", 7),
+ sentJun: upperLogChVal(monthlyAggCh, seg, ch, "sent", 6), deliveredJun: upperLogChVal(monthlyAggCh, seg, ch, "delivered", 6), clickJun: upperLogChVal(monthlyAggCh, seg, ch, "click", 6), openJun: upperLogChVal(monthlyAggCh, seg, ch, "read", 6),
+ sentJul: upperLogChVal(monthlyAggCh, seg, ch, "sent", 7), deliveredJul: upperLogChVal(monthlyAggCh, seg, ch, "delivered", 7), clickJul: upperLogChVal(monthlyAggCh, seg, ch, "click", 7), openJul: upperLogChVal(monthlyAggCh, seg, ch, "read", 7),
  };
  });
  });
@@ -1221,7 +1288,7 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  forecastSource: { bySegChDate, maxDate },
  upperForecastSource: { bySegChDate: upperBySegChDate, maxDate: upperMaxDate },
  targetAgg,
- debug: { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, upperAgg, upperAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, upperUnrecognizedSeg1, upperUnrecognizedChannel, upperMissingColumns, upperDateParseFailCount, upperDateParseFailSamples, costIdx } };
+ debug: { lowerRows, upperRows, monthlyUpperRows, costRows, targetRows, lowerAgg, lowerAggCh, upperAgg, upperAggCh, monthlyAgg, monthlyAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, upperUnrecognizedSeg1, upperUnrecognizedChannel, upperMissingColumns, upperDateParseFailCount, upperDateParseFailSamples, monthlyUnrecognizedSeg1, monthlyUnrecognizedChannel, monthlyMissingColumns, costIdx } };
 }
 
 // ===================== DEBUG PANEL (self-diagnosis, no DevTools needed) =====================
@@ -1233,7 +1300,7 @@ function renderDebugPanel(){
  const el = document.getElementById("debugPanelBody");
  if (!el) return;
  if (!LAST_DEBUG) { el.innerHTML = `<p class='note'>Belum ada data live (masih pakai fallback/cache) - debug panel hanya aktif setelah fetch live berhasil.</p>`; return; }
- const { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, upperAgg, upperAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, upperUnrecognizedSeg1, upperUnrecognizedChannel, upperMissingColumns, upperDateParseFailCount, upperDateParseFailSamples, costIdx } = LAST_DEBUG;
+ const { lowerRows, upperRows, monthlyUpperRows, costRows, targetRows, lowerAgg, lowerAggCh, upperAgg, upperAggCh, monthlyAgg, monthlyAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, upperUnrecognizedSeg1, upperUnrecognizedChannel, upperMissingColumns, upperDateParseFailCount, upperDateParseFailSamples, monthlyUnrecognizedSeg1, monthlyUnrecognizedChannel, monthlyMissingColumns, costIdx } = LAST_DEBUG;
  let html = "";
 
  if (dateParseFailCount > 0) {
@@ -1296,12 +1363,36 @@ function renderDebugPanel(){
  });
  html += `</tbody></table>`;
 
- html += `<h4 style='font-size:12px;margin:14px 0 6px;'>Daily Upper Funnel - Sent per Segmen per Channel (Jul, cek cepat channel mana yang kosong)</h4><table class='dt'><thead><tr><th>Segmen</th>${ALL_CHANNELS.filter(c=>c!=="SalesAI").map(c=>`<th class='num'>${CH_DISPLAY[c]}</th>`).join('')}</tr></thead><tbody>`;
+ html += `<h4 style='font-size:12px;margin:14px 0 6px;'>Daily Upper Funnel - Sent per Segmen per Channel (Jul, cek cepat channel mana yang kosong)</h4><div class="note" style="margin-bottom:6px;">Cuma informasional (dipakai untuk Forecast/Rentang Tanggal Custom/chart Rate Harian) - Engagement per Channel &amp; Upper Funnel per Channel di atas sekarang sumbernya Monthly Upper Funnel, lihat tabel di bawah.</div><table class='dt'><thead><tr><th>Segmen</th>${ALL_CHANNELS.filter(c=>c!=="SalesAI").map(c=>`<th class='num'>${CH_DISPLAY[c]}</th>`).join('')}</tr></thead><tbody>`;
  ALL_SEGMENTS.forEach(seg => {
  html += `<tr><td>${seg}</td>${ALL_CHANNELS.filter(c=>c!=="SalesAI").map(ch => {
  const v = upperLogChVal(upperAggCh, seg, ch, "sent", 7);
  return `<td class='num'>${v!=null ? nf(v) : '<span style="color:var(--muted);">-</span>'}</td>`;
  }).join('')}</tr>`;
+ });
+ html += `</tbody></table>`;
+
+ if (monthlyMissingColumns && monthlyMissingColumns.length) {
+ html += `<div class='balert-msg warn' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[WARNING]</span><div><b>Kolom tidak ketemu di header Monthly Upper Funnel:</b> ${monthlyMissingColumns.join(', ')} - kalau ini "Segment 1", "Channel", "Sent", "Delivered", "Read", "Click", atau "Month", datanya nggak akan kehitung.</div></div>`;
+ }
+ const monthlyUnrecSeg1Keys = Object.keys(monthlyUnrecognizedSeg1 || {});
+ if (monthlyUnrecSeg1Keys.length) {
+ html += `<div class='balert-msg info' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[INFO]</span><div><b>Nilai "Segment 1" di luar cakupan (sengaja diabaikan) di Monthly Upper Funnel log:</b> ${monthlyUnrecSeg1Keys.map(k=>`"${k}" (${monthlyUnrecognizedSeg1[k]} baris)`).join(', ')} - dashboard cuma menghitung "New", "Repeat", "LMT", "Top Up PDF".</div></div>`;
+ }
+ const monthlyUnrecChKeys = Object.keys(monthlyUnrecognizedChannel || {});
+ if (monthlyUnrecChKeys.length) {
+ html += `<div class='balert-msg info' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[INFO]</span><div><b>Channel di luar cakupan (sengaja diabaikan) di Monthly Upper Funnel log:</b> ${monthlyUnrecChKeys.map(k=>`"${k}" (${monthlyUnrecognizedChannel[k]} baris)`).join(', ')} - dashboard cuma menghitung Whatsapp/Email/Push Android/Push iOS/Push sesuai arahan.</div></div>`;
+ }
+
+ html += `<h4 style='font-size:12px;margin:14px 0 6px;'>Monthly Upper Funnel (log mentah, ${monthlyUpperRows.length} baris CSV) - Total per Segmen per Bulan (semua channel) - SUMBER untuk Engagement per Channel &amp; Upper Funnel per Channel</h4><table class='dt'><thead><tr><th>Segmen</th><th>Bulan</th><th class='num'>Jumlah baris</th><th class='num'>Sent</th><th class='num'>Delivered</th><th class='num'>Read</th><th class='num'>Click</th></tr></thead><tbody>`;
+ ALL_SEGMENTS.forEach(seg => {
+ const segData = monthlyAgg[seg];
+ if (!segData) { html += `<tr><td>${seg}</td><td colspan='6' style='color:var(--bad);'>Tidak ada baris log untuk segmen ini</td></tr>`; return; }
+ for (let m = 1; m <= 7; m++) {
+ const d = segData[m];
+ if (!d) { html += `<tr><td>${seg}</td><td>${MONTHS[m-1]}</td><td colspan='5' style='color:var(--muted);'>Tidak ada data</td></tr>`; continue; }
+ html += `<tr><td>${seg}</td><td>${MONTHS[m-1]}</td><td class='num'>${d.rows}</td><td class='num'>${nf(d.sent)}</td><td class='num'>${nf(d.delivered)}</td><td class='num'>${nf(d.read)}</td><td class='num'>${nf(d.click)}</td></tr>`;
+ }
  });
  html += `</tbody></table>`;
 
@@ -1332,10 +1423,10 @@ async function loadLiveData(){
  btn.disabled = true;
  statusEl.textContent = " Menarik data terbaru dari Google Sheet...";
  try {
- const [lowerRows, upperRows, costRows, targetRows] = await Promise.all([
- fetchSheetCSV("Lower Funnel"), fetchSheetCSV("Daily Upper Funnel"), fetchSheetCSV("Cost Detail"), fetchSheetCSV("Target"),
+ const [lowerRows, upperRows, monthlyUpperRows, costRows, targetRows] = await Promise.all([
+ fetchSheetCSV("Lower Funnel"), fetchSheetCSV("Daily Upper Funnel"), fetchSheetCSV("Monthly Upper Funnel"), fetchSheetCSV("Cost Detail"), fetchSheetCSV("Target"),
  ]);
- const computed = computeFromSheets(lowerRows, upperRows, costRows, targetRows);
+ const computed = computeFromSheets(lowerRows, upperRows, monthlyUpperRows, costRows, targetRows);
  TREND = computed.trend; COST = computed.cost; CPA = computed.cpa;
  PO_AMOUNT_COST = computed.poAmountCost; CHANNEL = computed.channel;
  CHANNEL_ENGAGE = computed.channelEngage; BUDGET_AUG = computed.budgetAug;
@@ -2254,6 +2345,98 @@ function renderChannelEngageChart(f){
  }
 }
 
+// ===================== DAILY RATE PER CHANNEL (line charts) =====================
+// Delivery/Read/Click Rate per day, one line per channel (WhatsApp/Email/Push - Sales AI doesn't
+// send via Upper Funnel so it's not applicable here). Sourced from Daily Upper Funnel
+// (UPPER_FORECAST_SOURCE.bySegChDate), respecting the Segmen & Channel filters. Only channels both
+// in-scope (WhatsApp/Email/Push) AND currently checked in the Channel filter are plotted.
+const DAILY_RATE_LINE_COLOR = { WhatsApp: BLUE, Email: TEAL, Push: WARN };
+function buildDailyRateSeries(bySegChDate, segArr, chArr){
+ const dateSet = new Set();
+ segArr.forEach(seg => chArr.forEach(ch => {
+ const chData = bySegChDate[seg] && bySegChDate[seg][ch];
+ if (chData) Object.keys(chData).forEach(d => dateSet.add(d));
+ }));
+ const dates = Array.from(dateSet).sort();
+ const perChannel = {};
+ chArr.forEach(ch => {
+ perChannel[ch] = dates.map(d => {
+ let sent=0, delivered=0, read=0, click=0;
+ segArr.forEach(seg => {
+ const rec = bySegChDate[seg] && bySegChDate[seg][ch] && bySegChDate[seg][ch][d];
+ if (rec) { sent+=rec.sent; delivered+=rec.delivered; read+=rec.read; click+=rec.click; }
+ });
+ return {
+ deliveryRate: sent ? delivered/sent : null,
+ readRate: delivered ? read/delivered : null,
+ clickRate: sent ? click/sent : null,
+ };
+ });
+ });
+ return { dates, perChannel };
+}
+function renderDailyRateCharts(f){
+ const segList = segs(f.seg);
+ const chList = chans(f.ch).filter(ch => ["WhatsApp","Email","Push"].includes(ch));
+ document.getElementById("dailyRateCap").textContent =
+ `Dari Daily Upper Funnel${segCapText(segList)}${chCapText(chList.length ? chList : ["WhatsApp","Email","Push"])} - Sales AI tidak berlaku di sini (tidak dikirim lewat Upper Funnel)`;
+
+ ["dailyDeliveryRateChart","dailyReadRateChart","dailyClickRateChart"].forEach(id => {
+ if (charts[id]) { charts[id].destroy(); delete charts[id]; }
+ });
+
+ const noteEl = document.getElementById("dailyRateNote");
+ if (!chList.length) {
+ noteEl.innerHTML = `<p class="note">Pilih minimal satu channel (WhatsApp/Email/Push) di filter atas untuk melihat chart ini.</p>`;
+ return;
+ }
+ if (!UPPER_FORECAST_SOURCE || !UPPER_FORECAST_SOURCE.bySegChDate) {
+ noteEl.innerHTML = `<p class="note">Butuh data live dari Daily Upper Funnel - belum tersedia (masih cache/fallback, atau live-fetch belum berhasil).</p>`;
+ return;
+ }
+
+ const { dates, perChannel } = buildDailyRateSeries(UPPER_FORECAST_SOURCE.bySegChDate, segList, chList);
+ if (!dates.length) {
+ noteEl.innerHTML = `<p class="note">Tidak ada data harian untuk kombinasi filter ini.</p>`;
+ return;
+ }
+ const labels = dates.map(d => d.slice(8,10) + "/" + d.slice(5,7));
+
+ function makeChart(canvasId, metricKey, titleLabel){
+ const ctx = document.getElementById(canvasId).getContext("2d");
+ const datasets = chList.map(ch => ({
+ label: CH_DISPLAY[ch] || ch,
+ data: perChannel[ch].map(p => p[metricKey]),
+ borderColor: DAILY_RATE_LINE_COLOR[ch], backgroundColor: DAILY_RATE_LINE_COLOR[ch],
+ borderWidth: 2, tension: .25, pointRadius: 1.5, spanGaps: true,
+ }));
+ charts[canvasId] = new Chart(ctx, {
+ type: "line",
+ data: { labels, datasets },
+ options: {
+ responsive: true, maintainAspectRatio: false,
+ interaction: { mode: "index", intersect: false },
+ plugins: {
+ legend: { position: "bottom", labels: { boxWidth: 10, font: { size: 9.5 } } },
+ tooltip: { callbacks: { label: c => `${c.dataset.label}: ${c.parsed.y!=null?pct(c.parsed.y,1):'-'}` } }
+ },
+ scales: {
+ x: { ticks: { maxTicksLimit: 8, font: { size: 9 } } },
+ y: { beginAtZero: true, ticks: { callback: v => pct(v,0), font: { size: 9 } } },
+ }
+ }
+ });
+ }
+ makeChart("dailyDeliveryRateChart", "deliveryRate");
+ makeChart("dailyReadRateChart", "readRate");
+ makeChart("dailyClickRateChart", "clickRate");
+
+ const missingDaysNote = dates.length < 30
+ ? ` Data harian saat ini cuma mencakup ${dates.length} hari (Juli sebagian besar belum ada karena "Segmen 1" di Daily Upper Funnel masih kosong untuk bulan itu - lihat Debug panel).`
+ : '';
+ noteEl.innerHTML = `<p class="note">Titik yang terputus/kosong = tidak ada baris Sent untuk hari itu di kombinasi filter ini.${missingDaysNote}</p>`;
+}
+
 // ===================== CPA CHART =====================
 function renderCpaChart(f){
  const ctx = document.getElementById("cpaChart").getContext("2d");
@@ -3126,6 +3309,7 @@ function onFilterChange(){
  renderJunJulChart(f);
  renderFunnelRatioTable(f);
  renderChannelEngageChart(f);
+ renderDailyRateCharts(f);
  renderChannelDetailTable(f);
  renderCpaChart(f);
  renderBudgetChart(f);
