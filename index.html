@@ -870,21 +870,24 @@ const TARGET_FUNNEL_TO_KEY = { "Created":"created", "After FF":"afterFF", "Eligi
 function parseTargetLog(rows){
  const { dataStart, col, missing } = resolveColumnsByHeader(rows, TARGET_LOG_LABELS);
  const bySeg = {};
+ const unrecognizedSeg = {}, unrecognizedMonth = {}, unrecognizedFunnel = {};
  for (let i = dataStart; i < rows.length; i++) {
  const rawSeg = cellAtCol(rows, i, col.segment);
  if (!rawSeg) continue;
  const seg = RAW_SEG_TO_DASH_SEG[rawSeg];
- if (!seg) continue;
- const monthNum = TARGET_MONTH_TO_NUM[cellAtCol(rows, i, col.month)];
- if (!monthNum) continue;
- const metricKey = TARGET_FUNNEL_TO_KEY[cellAtCol(rows, i, col.funnel)];
- if (!metricKey) continue;
+ if (!seg) { unrecognizedSeg[rawSeg] = (unrecognizedSeg[rawSeg]||0)+1; continue; }
+ const rawMonth = cellAtCol(rows, i, col.month);
+ const monthNum = TARGET_MONTH_TO_NUM[rawMonth];
+ if (!monthNum) { if (rawMonth) unrecognizedMonth[rawMonth] = (unrecognizedMonth[rawMonth]||0)+1; continue; }
+ const rawFunnel = cellAtCol(rows, i, col.funnel);
+ const metricKey = TARGET_FUNNEL_TO_KEY[rawFunnel];
+ if (!metricKey) { if (rawFunnel) unrecognizedFunnel[rawFunnel] = (unrecognizedFunnel[rawFunnel]||0)+1; continue; }
  const val = valAtCol(rows, i, col.target) || 0;
  bySeg[seg] = bySeg[seg] || {};
  bySeg[seg][monthNum] = bySeg[seg][monthNum] || {};
  bySeg[seg][monthNum][metricKey] = (bySeg[seg][monthNum][metricKey] || 0) + val;
  }
- return bySeg;
+ return { bySeg, missingColumns: missing, unrecognizedSeg, unrecognizedMonth, unrecognizedFunnel };
 }
 function lowerLogVal(agg, seg, metric, month){
  const s = agg[seg]; if (!s || !s[month]) return null;
@@ -1027,7 +1030,7 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  const upperIdx = buildUpperIndex(upperRows);
  const costIdx = buildCostIndex(costRows);
  const { bySeg: lowerAgg, bySegCh: lowerAggCh, bySegChDate, maxDate, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, monthMismatchCount, monthMismatchSamples } = parseLowerFunnelLog(lowerRows);
- const targetAgg = parseTargetLog(targetRows);
+ const { bySeg: targetAgg, missingColumns: targetMissingColumns, unrecognizedSeg: targetUnrecognizedSeg, unrecognizedMonth: targetUnrecognizedMonth, unrecognizedFunnel: targetUnrecognizedFunnel } = parseTargetLog(targetRows);
  const numMonths = detectNumMonths(lowerAgg, targetAgg);
  const LAST_M = numMonths, PREV_M = numMonths - 1; // "current" and "previous" month, dynamically - replaces old hardcoded Jul(7)/Jun(6)
 
@@ -1163,7 +1166,7 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  numMonths,
  forecastSource: { bySegChDate, maxDate },
  targetAgg,
- debug: { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, monthMismatchCount, monthMismatchSamples, upperIdx, costIdx } };
+ debug: { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, monthMismatchCount, monthMismatchSamples, targetMissingColumns, targetUnrecognizedSeg, targetUnrecognizedMonth, targetUnrecognizedFunnel, upperIdx, costIdx } };
 }
 
 // ===================== DEBUG PANEL (self-diagnosis, no DevTools needed) =====================
@@ -1180,8 +1183,24 @@ function renderDebugPanel(){
  const el = document.getElementById("debugPanelBody");
  if (!el) return;
  if (!LAST_DEBUG) { el.innerHTML = `<p class='note'>Belum ada data live (masih pakai fallback/cache) - debug panel hanya aktif setelah fetch live berhasil.</p>`; return; }
- const { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, monthMismatchCount, monthMismatchSamples, upperIdx, costIdx } = LAST_DEBUG;
+ const { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, monthMismatchCount, monthMismatchSamples, targetMissingColumns, targetUnrecognizedSeg, targetUnrecognizedMonth, targetUnrecognizedFunnel, upperIdx, costIdx } = LAST_DEBUG;
  let html = "";
+
+ if (targetMissingColumns && targetMissingColumns.length) {
+ html += `<div class='balert-msg bad' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[ALERT]</span><div><b>Kolom tidak ketemu di header sheet Target:</b> ${targetMissingColumns.join(', ')} - semua baris Target nggak akan kehitung sampai ini diperbaiki.</div></div>`;
+ }
+ const tUnrecMonthKeys = Object.keys(targetUnrecognizedMonth || {});
+ if (tUnrecMonthKeys.length) {
+ html += `<div class='balert-msg bad' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[ALERT]</span><div><b>Nilai Bulan tidak dikenali di sheet Target:</b> ${tUnrecMonthKeys.map(k=>`"${k}" (${targetUnrecognizedMonth[k]} baris)`).join(', ')} - kode cuma kenal format persis "Jan 26", "Feb 26", ..., "Aug 26", dst. Baris dengan format lain (misal "Agustus 26", "Aug-26", "8/2026") di-skip total, makanya target-nya kelihatan "tidak ada" walau datanya sebenarnya ada di sheet.</div></div>`;
+ }
+ const tUnrecFunnelKeys = Object.keys(targetUnrecognizedFunnel || {});
+ if (tUnrecFunnelKeys.length) {
+ html += `<div class='balert-msg bad' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[ALERT]</span><div><b>Nilai Funnel tidak dikenali di sheet Target:</b> ${tUnrecFunnelKeys.map(k=>`"${k}" (${targetUnrecognizedFunnel[k]} baris)`).join(', ')} - kode cuma kenal persis "Created", "After FF", "Eligible", "Accepted", "Paid out", "Paid out Amount".</div></div>`;
+ }
+ const tUnrecSegKeys = Object.keys(targetUnrecognizedSeg || {});
+ if (tUnrecSegKeys.length) {
+ html += `<div class='balert-msg warn' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[WARNING]</span><div><b>Nilai Segmen tidak dikenali di sheet Target:</b> ${tUnrecSegKeys.map(k=>`"${k}" (${targetUnrecognizedSeg[k]} baris)`).join(', ')}.</div></div>`;
+ }
 
  if (monthMismatchCount > 0) {
  html += `<div class='balert-msg warn' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[WARNING]</span><div><b>${nf(monthMismatchCount)} baris kolom "Month"-nya nggak cocok sama bulan asli di Created Date</b> - contoh: ${monthMismatchSamples.map(s=>`"${s}"`).join(', ')}. Baris ini TETAP kehitung bener (kode sekarang selalu percaya Created Date, bukan kolom Month), tapi ini pertanda ada baris yang kolom Month-nya salah ketik/nggak ke-update - kalau mau rapi, cek &amp; benerin manual di sheet.</div></div>`;
