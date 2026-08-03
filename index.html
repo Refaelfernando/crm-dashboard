@@ -1247,12 +1247,15 @@ function renderDebugPanel(){
  });
  html += `</tbody></table>`;
 
- html += `<h4 style='font-size:12px;margin:14px 0 6px;'>Upper Funnel & Cost Detail (format pivot lama, dipetakan lewat COST_SOURCE_SEG)</h4><table class='dt'><thead><tr><th>Segmen dashboard</th><th>Sumber di Upper Funnel / Cost Detail</th><th>Status</th></tr></thead><tbody>`;
+ html += `<h4 style='font-size:12px;margin:14px 0 6px;'>Upper Funnel & Cost Detail (format pivot lama, dipetakan lewat COST_SOURCE_SEG)</h4><p class='note'>Upper Funnel: ${upperRows.length} baris CSV diterima. Cost Detail: ${costRows.length} baris CSV diterima.</p><table class='dt'><thead><tr><th>Segmen dashboard</th><th>Sumber di Upper Funnel / Cost Detail</th><th>Status</th></tr></thead><tbody>`;
  ALL_SEGMENTS.forEach(seg => {
  const src = COST_SOURCE_SEG[seg];
  html += `<tr><td>${seg}</td><td>${src || '-'}</td><td>${src ? (upperIdx[src] ? 'ketemu di Upper Funnel' : '<span style="color:var(--bad);">header segmen tidak ketemu</span>') : '<span style="color:var(--muted);">sengaja di-exclude (tidak ada sumber)</span>'}</td></tr>`;
  });
  html += `</tbody></table>`;
+ if (upperRows.length < 5) {
+ html += `<div class='balert-msg bad' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-top:10px;'><span>[ALERT]</span><div><b>Sheet Upper Funnel cuma balikin ${upperRows.length} baris CSV</b> - kalau harusnya ratusan baris, ini pertanda fetch-nya gagal ambil data yang bener (kemungkinan nama tab "Upper Funnel" di sheet berubah, atau tab-nya kosong/keganti struktur). Cek nama tab persis di Google Sheets.</div></div>`;
+ }
 
  el.innerHTML = html;
 }
