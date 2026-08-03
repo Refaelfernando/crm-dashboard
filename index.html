@@ -408,6 +408,8 @@ const MONTHS_ID = ["Januari","Februari","Maret","April","Mei","Juni","Juli","Agu
 // (Jan-Jul) to match the offline fallback snapshot; a live fetch will extend this automatically
 // as new months (Aug, Sep, ...) get real data, with no code changes needed month to month.
 let NUM_MONTHS = 7;
+let BUDGET_M = 8; // month number (1-indexed) the Budget section forecasts for - set from computeFromSheets() after each live fetch
+let BUDGET_M_IS_CURRENT = true; // true = BUDGET_M is the in-progress running month (budget-to-date/at-risk), false = it's a forward-looking not-yet-started month
 let MONTHS = MONTHS_FULL.slice(0, NUM_MONTHS);
 
 const TREND_FALLBACK = {
@@ -880,7 +882,16 @@ function dateRangeList(dateFrom, dateTo){
  const list = [];
  let d = new Date(dateFrom + "T00:00:00");
  const to = new Date(dateTo + "T00:00:00");
- while (d <= to) { list.push(d.toISOString().slice(0,10)); d.setDate(d.getDate()+1); }
+ // NOTE: previously used d.toISOString() here, which converts to UTC before formatting. For any
+ // browser running in a timezone ahead of UTC (e.g. WIB/UTC+7, Jakarta), local midnight is still the
+ // PREVIOUS day in UTC, so toISOString() silently shifted every date in the range back by 1 day
+ // (e.g. picking 01/08-02/08 actually summed 31/07-01/08). Using local Y/M/D components instead
+ // avoids the UTC conversion entirely and keeps the range exactly what the date pickers show.
+ while (d <= to) {
+ const y = d.getFullYear(), m = String(d.getMonth()+1).padStart(2,'0'), day = String(d.getDate()).padStart(2,'0');
+ list.push(`${y}-${m}-${day}`);
+ d.setDate(d.getDate()+1);
+ }
  return list;
 }
 function sumDateRange(bySegDate, bySegChDate, segArr, chArr, dateFrom, dateTo, metric){
@@ -1075,6 +1086,19 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  const { bySeg: targetAgg, missingColumns: targetMissingColumns, unrecognizedSeg: targetUnrecognizedSeg, unrecognizedMonth: targetUnrecognizedMonth, unrecognizedFunnel: targetUnrecognizedFunnel } = parseTargetLog(targetRows);
  const numMonths = detectNumMonths(lowerAgg, targetAgg);
  const LAST_M = numMonths, PREV_M = numMonths - 1; // "current" and "previous" month, dynamically - replaces old hardcoded Jul(7)/Jun(6)
+ // ---- Which month should the Budget forecast target? ----
+ // detectNumMonths() now returns the latest month with ANY actual rows, including a partial
+ // in-progress month (e.g. Aug 1-2 already counts). That's correct for LAST_M (used for KPIs/trend/
+ // segment comparisons), but the OLD budget logic assumed LAST_M was always a fully-COMPLETE past
+ // month and used LAST_M+1 to reach the "next, not-yet-started" month whose target the Target sheet
+ // pre-fills for planning. Now that LAST_M itself can BE that in-progress month, LAST_M+1 overshoots
+ // by one (e.g. produced "Budget September" while August was still running). Fix: only use the old
+ // +1 forward-looking behavior when the latest month in the data is actually a COMPLETE past month
+ // (i.e. it doesn't match the real current calendar month) - otherwise target LAST_M itself, since
+ // that's the month we're actually trying to budget/track spend for right now.
+ const realNow = new Date();
+ const isLastMonthInProgress = (LAST_M === realNow.getMonth() + 1);
+ const BUDGET_M = isLastMonthInProgress ? LAST_M : LAST_M + 1;
 
  const trend = {}, cost = {}, cpa = {}, poAmountCost = {}, budgetAug = {};
  const channelEngage = {}, channelDetail = {}, costByChannel = {};
@@ -1141,7 +1165,7 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  poAmountCost[seg] = (costJun != null) ? { junAmt, junCost: costJun, julAmt, julCost: costJul } : null;
 
  // ---- Budget bulan berikutnya: Target Paid Out (dari sheet Target) x CPA bulan lalu ----
- const targetPO = targetVal(targetAgg, seg, "paidOut", LAST_M + 1);
+ const targetPO = targetVal(targetAgg, seg, "paidOut", BUDGET_M);
  const cpaSeg = cpa[seg];
  budgetAug[seg] = targetPO == null ? null : {
  targetPO,
@@ -1185,7 +1209,7 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
 
  // ---- Cost Agustus aktual (untuk alert pemakaian budget) ----
  const augCost = {};
- SEGS.forEach(seg => { const srcSeg = COST_SOURCE_SEG[seg]; augCost[seg] = srcSeg ? (costVal(costRows, costIdx, srcSeg, "Total", LAST_M + 1) || 0) : 0; });
+ SEGS.forEach(seg => { const srcSeg = COST_SOURCE_SEG[seg]; augCost[seg] = srcSeg ? (costVal(costRows, costIdx, srcSeg, "Total", BUDGET_M) || 0) : 0; });
 
  // ---- Statistik WhatsApp pooled 3 bulan terakhir (untuk kalkulator pacing) ----
  const waStats = {};
@@ -1205,7 +1229,7 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  });
 
  return { trend, cost, cpa, poAmountCost, channel, channelEngage, budgetAug, channelDetail, costByChannel, augCost, waStats,
- numMonths,
+ numMonths, budgetM: BUDGET_M, budgetMIsCurrent: isLastMonthInProgress,
  forecastSource: { bySegChDate, bySegDate, maxDate },
  targetAgg,
  debug: { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, monthMismatchCount, monthMismatchSamples, targetMissingColumns, targetUnrecognizedSeg, targetUnrecognizedMonth, targetUnrecognizedFunnel, upperUnrecognizedSeg, upperUnrecognizedChannel, upperMissingColumns, upperIdx, costIdx } };
@@ -1339,6 +1363,8 @@ async function loadLiveData(){
  FORECAST_SOURCE = computed.forecastSource;
  TARGET_AGG = computed.targetAgg;
  NUM_MONTHS = computed.numMonths;
+ BUDGET_M = computed.budgetM;
+ BUDGET_M_IS_CURRENT = computed.budgetMIsCurrent;
  MONTHS = MONTHS_FULL.slice(0, NUM_MONTHS);
  rebuildMonthDropdown();
  const headerSubEl = document.getElementById("headerSub");
@@ -2359,9 +2385,11 @@ function renderCpaChart(f){
 function renderBudgetChart(f){
  const ctx = document.getElementById("budgetChart").getContext("2d");
  const prevMonthLabel = MONTHS[NUM_MONTHS-2] || MONTHS[0], lastMonthLabel = MONTHS[NUM_MONTHS-1];
- const nextMonthLabel = MONTHS_ID[NUM_MONTHS] || `Bulan ${NUM_MONTHS+1}`;
+ const budgetMonthLabel = MONTHS_ID[BUDGET_M-1] || `Bulan ${BUDGET_M}`;
  const titleEl = document.getElementById("budgetTitle");
- if (titleEl) titleEl.textContent = `Budget ${nextMonthLabel} - Alokasi per Segmen`;
+ if (titleEl) titleEl.textContent = BUDGET_M_IS_CURRENT
+ ? `Budget Bulan Berjalan (${budgetMonthLabel}) - Alokasi per Segmen`
+ : `Budget ${budgetMonthLabel} - Alokasi per Segmen`;
  const list = costSegs(f.seg);
  const base = list.map(seg => BUDGET_AUG[seg] ? BUDGET_AUG[seg].budgetBase : null);
  const downside = list.map(seg => BUDGET_AUG[seg] ? BUDGET_AUG[seg].budgetDownside : null);
@@ -2852,7 +2880,7 @@ function renderCostRatioTable(f){
 // ===================== BUDGET USAGE ALERT =====================
 function renderBudgetAlert(f){
  const titleEl = document.getElementById("budgetAlertTitle");
- if (titleEl) titleEl.textContent = ` Alert Pemakaian Budget ${MONTHS_ID[NUM_MONTHS] || `Bulan ${NUM_MONTHS+1}`}`;
+ if (titleEl) titleEl.textContent = ` Alert Pemakaian Budget ${MONTHS_ID[BUDGET_M-1] || `Bulan ${BUDGET_M}`}`;
  const list = costSegs(f.seg);
  document.getElementById("budgetAlertCap").textContent = list.length === ALL_SEGMENTS.filter(s=>COST_SOURCE_SEG[s]).length ? "Semua segmen (SL tidak punya data cost)" : `Segmen: ${list.join(', ') || '(tidak ada yang punya data cost)'}`;
 
