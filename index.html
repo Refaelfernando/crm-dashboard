@@ -221,6 +221,7 @@
 
  <!-- KPI ROW -->
  <section class="kpi-row" id="kpiRow"></section>
+ <section class="kpi-row" id="dailyPaceRow" style="margin-bottom:var(--gap);"></section>
  <div id="kpiFIR" class="card" style="margin-bottom:var(--gap);"></div>
 
  <!-- FORECAST -->
@@ -712,8 +713,14 @@ function parseLowerFunnelLog(rows){
  // in the debug panel so this doesn't fail silently.
  let dateParseFailCount = 0;
  const dateParseFailSamples = []; // a few raw values that failed, to show in the debug panel
- // "Month" is optional - derive it from "Created Date" per-row if the column isn't there.
+ // "Month" column is now only a FALLBACK. Created Date is the authoritative source whenever it
+ // parses successfully - using the Month column as primary caused a real bug: a row with Month="7"
+ // but Created Date="2026-08-01" (e.g. copied from yesterday's row and the Month cell not updated)
+ // would count toward July in month-based views but toward Aug 1 in date-range views, making the
+ // two disagree. Preferring the actual date avoids that whole class of mismatch.
  const monthColMissing = col.month == null;
+ let monthMismatchCount = 0;
+ const monthMismatchSamples = [];
  for (let i = dataStart; i < rows.length; i++) {
  const rawSeg = cellAtCol(rows, i, col.segment);
  if (!rawSeg) continue;
@@ -723,8 +730,12 @@ function parseLowerFunnelLog(rows){
  const dateMatch = rawDateCell.match(/^(\d{4})[-\/](\d{2})[-\/](\d{2})/); // accepts "2026-07-27" or "2026/07/27", tolerates trailing time/whitespace
  const dateStr = dateMatch ? `${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}` : null; // normalized to YYYY-MM-DD regardless of source separator, since this is used as a dict key and compared lexicographically for maxDate
  if (!dateStr && rawDateCell) { dateParseFailCount++; if (dateParseFailSamples.length < 5) dateParseFailSamples.push(rawDateCell); }
- let month = monthColMissing ? null : parseInt(cellAtCol(rows, i, col.month), 10);
- if ((!month || month < 1 || month > 12) && dateStr) month = parseInt(dateStr.slice(5,7), 10);
+ const monthColVal = monthColMissing ? null : parseInt(cellAtCol(rows, i, col.month), 10);
+ let month = dateStr ? parseInt(dateStr.slice(5,7), 10) : (monthColVal >= 1 && monthColVal <= 12 ? monthColVal : null);
+ if (dateStr && monthColVal >= 1 && monthColVal <= 12 && monthColVal !== month) {
+ monthMismatchCount++;
+ if (monthMismatchSamples.length < 5) monthMismatchSamples.push(`baris tanggal ${dateStr} tapi kolom Month="${monthColVal}"`);
+ }
  if (!month || month < 1 || month > 12) continue;
  const v = {
  created: valAtCol(rows, i, col.created) || 0,
@@ -758,7 +769,7 @@ function parseLowerFunnelLog(rows){
  if (!maxDate || dateStr > maxDate) maxDate = dateStr;
  }
  }
- return { bySeg, bySegCh, bySegChDate, maxDate, unrecognizedSeg, unrecognizedChannel, missingColumns: missing, totalRowsRead: rows.length - dataStart, dateParseFailCount, dateParseFailSamples };
+ return { bySeg, bySegCh, bySegChDate, maxDate, unrecognizedSeg, unrecognizedChannel, missingColumns: missing, totalRowsRead: rows.length - dataStart, dateParseFailCount, dateParseFailSamples, monthMismatchCount, monthMismatchSamples };
 }
 
 // ---- FORECAST: linear regression on the current (in-progress) month's daily cumulative totals,
@@ -1015,7 +1026,7 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  const SEGS = ALL_SEGMENTS;
  const upperIdx = buildUpperIndex(upperRows);
  const costIdx = buildCostIndex(costRows);
- const { bySeg: lowerAgg, bySegCh: lowerAggCh, bySegChDate, maxDate, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples } = parseLowerFunnelLog(lowerRows);
+ const { bySeg: lowerAgg, bySegCh: lowerAggCh, bySegChDate, maxDate, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, monthMismatchCount, monthMismatchSamples } = parseLowerFunnelLog(lowerRows);
  const targetAgg = parseTargetLog(targetRows);
  const numMonths = detectNumMonths(lowerAgg, targetAgg);
  const LAST_M = numMonths, PREV_M = numMonths - 1; // "current" and "previous" month, dynamically - replaces old hardcoded Jul(7)/Jun(6)
@@ -1152,7 +1163,7 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  numMonths,
  forecastSource: { bySegChDate, maxDate },
  targetAgg,
- debug: { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, upperIdx, costIdx } };
+ debug: { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, monthMismatchCount, monthMismatchSamples, upperIdx, costIdx } };
 }
 
 // ===================== DEBUG PANEL (self-diagnosis, no DevTools needed) =====================
@@ -1169,8 +1180,12 @@ function renderDebugPanel(){
  const el = document.getElementById("debugPanelBody");
  if (!el) return;
  if (!LAST_DEBUG) { el.innerHTML = `<p class='note'>Belum ada data live (masih pakai fallback/cache) - debug panel hanya aktif setelah fetch live berhasil.</p>`; return; }
- const { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, upperIdx, costIdx } = LAST_DEBUG;
+ const { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, monthMismatchCount, monthMismatchSamples, upperIdx, costIdx } = LAST_DEBUG;
  let html = "";
+
+ if (monthMismatchCount > 0) {
+ html += `<div class='balert-msg warn' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[WARNING]</span><div><b>${nf(monthMismatchCount)} baris kolom "Month"-nya nggak cocok sama bulan asli di Created Date</b> - contoh: ${monthMismatchSamples.map(s=>`"${s}"`).join(', ')}. Baris ini TETAP kehitung bener (kode sekarang selalu percaya Created Date, bukan kolom Month), tapi ini pertanda ada baris yang kolom Month-nya salah ketik/nggak ke-update - kalau mau rapi, cek &amp; benerin manual di sheet.</div></div>`;
+ }
 
  if (dateParseFailCount > 0) {
  html += `<div class='balert-msg bad' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[ALERT]</span><div><b>${nf(dateParseFailCount)} baris gagal dibaca tanggalnya di kolom Created Date</b> (harus format YYYY-MM-DD, misal 2026-07-27) - contoh nilai mentah yang gagal: ${dateParseFailSamples.map(s=>`"${s}"`).join(', ')}. Baris ini TETAP kehitung di KPI/Trend (level bulan), tapi HILANG TOTAL dari Forecast &amp; Rentang Tanggal Custom (yang butuh tanggal harian per baris). Kalau ini jumlahnya besar, itu penjelasan kenapa Forecast kosong - cek format kolom Created Date di sheet (mungkin ke-set sebagai format tanggal lokal Indonesia seperti DD/MM/YYYY, bukan teks YYYY-MM-DD).</div></div>`;
@@ -1787,6 +1802,74 @@ function renderKPIs(f){
  <div class='v'>${c.v}</div>
  ${c.s ? `<div class='s ${c.cls||''}'>${c.s}</div>` : ''}
  </div>`).join("");
+}
+
+// ===================== DAILY PACE VS TARGET =====================
+function renderDailyPaceKPI(f){
+ const box = document.getElementById("dailyPaceRow");
+ if (!box) return;
+ if (f.dateFrom && f.dateTo) { box.innerHTML = ""; return; } // Rentang Tanggal Custom section already covers this in detail
+ if (!FORECAST_SOURCE || !FORECAST_SOURCE.bySegChDate) { box.innerHTML = `<div class='kpi'><div class='l'>Rata-rata Created/Hari vs Target</div><div class='s neu'>Butuh data live dengan tanggal harian - belum tersedia.</div></div>`; return; }
+
+ const list = segs(f.seg);
+ const allChSelected = f.ch.length >= ALL_CHANNELS.length;
+ const curM = (f.month === "all") ? (NUM_MONTHS - 1) : f.month; // 0-indexed
+ const monthNum = curM + 1; // 1-indexed, matches sheet's Month numbering
+
+ function createdForMonth(){
+ let total = 0, any = false;
+ list.forEach(seg => {
+ if (allChSelected) {
+ const v = TREND[seg] && TREND[seg].created[curM];
+ if (v != null) { total += v; any = true; }
+ } else {
+ f.ch.forEach(ch => {
+ const d = CHANNEL_DETAIL[seg] && CHANNEL_DETAIL[seg][ch];
+ if (d && d.created && d.created[curM] != null) { total += d.created[curM]; any = true; }
+ });
+ }
+ });
+ return any ? total : null;
+ }
+ const totalCreated = createdForMonth();
+
+ const [fy] = (FORECAST_SOURCE.maxDate || "2026-01-01").split('-').map(Number);
+ const totalDaysInMonth = daysInMonth(fy, monthNum);
+ let daysElapsed = totalDaysInMonth, isInProgress = false;
+ if (FORECAST_SOURCE.maxDate) {
+ const [, fm, fd] = FORECAST_SOURCE.maxDate.split('-').map(Number);
+ if (fm === monthNum) { daysElapsed = fd; isInProgress = true; }
+ }
+
+ const avgPerDay = (totalCreated != null && daysElapsed) ? totalCreated/daysElapsed : null;
+
+ let monthlyTarget = 0, anyTarget = false;
+ list.forEach(seg => { const t = getTarget(seg, "created", monthNum); if (t != null) { monthlyTarget += t; anyTarget = true; } });
+ const dailyTarget = anyTarget ? monthlyTarget/totalDaysInMonth : null;
+
+ if (avgPerDay == null && dailyTarget == null) { box.innerHTML = ""; return; }
+
+ const chLabel = allChSelected ? "" : ` (${f.ch.map(c=>CH_DISPLAY[c]||c).join(', ')})`;
+ let subText, cls;
+ if (avgPerDay != null && dailyTarget != null) {
+ const ratio = avgPerDay/dailyTarget;
+ const av = achievementVerdict(ratio);
+ cls = av.level === "ok" ? "pos" : (av.level === "bad" ? "neg" : "neu");
+ subText = `Target: ${dailyTarget.toFixed(1)}/hari (${pct(ratio,0)} dari target, ${av.text})`;
+ } else if (avgPerDay != null) {
+ subText = `Belum ada target Created untuk bulan ini di sheet Target`;
+ cls = "neu";
+ } else {
+ subText = `Belum ada data Created harian untuk bulan ini`;
+ cls = "neu";
+ }
+
+ box.innerHTML = `
+ <div class='kpi' style='border-left-color:${TEAL};'>
+ <div class='l'>Rata-rata Created/Hari - ${MONTHS[curM]}${chLabel}${isInProgress?' (bulan berjalan)':''}</div>
+ <div class='v'>${avgPerDay!=null ? avgPerDay.toFixed(1) : '-'}</div>
+ <div class='s ${cls}' style='margin-top:6px;'>${subText}</div>
+ </div>`;
 }
 
 function renderKPIFIR(f){
@@ -3003,6 +3086,7 @@ function recomputePacing(){
 function onFilterChange(){
  const f = getFilters();
  renderKPIs(f);
+ renderDailyPaceKPI(f);
  renderKPIFIR(f);
  renderForecast(f);
  renderCustomRange(f);
