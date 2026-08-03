@@ -248,7 +248,7 @@
  <section class="row cols2">
  <div class="card">
  <h3 id="trendTitle">Trend Created &amp; Paid Out</h3>
- <div class="cap">Semua bulan (termasuk Jul) adalah data aktual dari log transaksi.</div>
+ <div class="cap">Semua bulan (termasuk bulan berjalan) adalah data aktual dari log transaksi.</div>
  <div class="chart-box tall"><canvas id="trendChart"></canvas></div>
  <div id="trendFIR"></div>
  </div>
@@ -702,16 +702,23 @@ const LOWER_LOG_LABELS = { date:"Created Date", segment:"Segment", channel:"Chan
 function parseLowerFunnelLog(rows){
  const { dataStart, col, missing } = resolveColumnsByHeader(rows, LOWER_LOG_LABELS);
  const bySeg = {}, bySegCh = {};
- // bySegChDate[seg][ch]["YYYY-MM-DD"] = {created,paidOut,paidOutAmount} - powers the forecast (needs
- // real calendar dates, not just the Month column, to know how many days have actually elapsed).
+ // bySegDate[seg]["YYYY-MM-DD"] = {created,paidOut,paidOutAmount} - channel-AGNOSTIC daily total,
+ // populated for every row with a valid date regardless of whether its Channel is recognized. This
+ // is what "Semua Channel" date-range/Forecast views must use to match the month-based KPI totals
+ // (which also don't gate on channel recognition) - splitting by channel below additionally
+ // requires a recognized channel, which previously caused date-range totals to silently undercount
+ // whenever a row had an unrecognized channel value.
+ const bySegDate = {};
+ // bySegChDate[seg][ch]["YYYY-MM-DD"] = {created,paidOut,paidOutAmount} - per-channel breakdown,
+ // only for rows with a recognized channel (needed for channel-specific filtering/Forecast).
  const bySegChDate = {};
  let maxDate = null; // freshest date found anywhere in the log - the "as of" reference point for forecasting
  const zeroStage = () => ({ created:0, afterFF:0, eligible:0, accepted:0, paidOut:0, paidOutAmount:0, rows:0 });
  const unrecognizedSeg = {};
  const unrecognizedChannel = {}; // Channel values that don't match WhatsApp/Email/Push Notification/Sales AI -
- // rows with these still count toward Created/Paid Out totals (KPI cards etc.), but can't be filed
- // into a per-channel bucket, so they're invisible to Forecast/channel-breakdown features. Surfaced
- // in the debug panel so this doesn't fail silently.
+ // rows with these still count toward Created/Paid Out totals (KPI cards, "Semua Channel" date-range,
+ // Forecast), but can't be filed into a per-channel bucket, so channel-SPECIFIC filtering can't see
+ // them. Surfaced in the debug panel so this doesn't fail silently.
  let dateParseFailCount = 0;
  const dateParseFailSamples = []; // a few raw values that failed, to show in the debug panel
  // "Month" column is now only a FALLBACK. Created Date is the authoritative source whenever it
@@ -750,6 +757,17 @@ function parseLowerFunnelLog(rows){
  bySeg[seg][month] = bySeg[seg][month] || zeroStage();
  Object.keys(v).forEach(k => bySeg[seg][month][k] += v[k]);
  bySeg[seg][month].rows++;
+
+ // Channel-agnostic daily total - runs for every row with a valid date, independent of channel recognition.
+ if (dateStr) {
+ bySegDate[seg] = bySegDate[seg] || {};
+ bySegDate[seg][dateStr] = bySegDate[seg][dateStr] || { created:0, paidOut:0, paidOutAmount:0 };
+ bySegDate[seg][dateStr].created += v.created;
+ bySegDate[seg][dateStr].paidOut += v.paidOut;
+ bySegDate[seg][dateStr].paidOutAmount += v.paidOutAmount;
+ if (!maxDate || dateStr > maxDate) maxDate = dateStr;
+ }
+
  const rawCh = cellAtCol(rows, i, col.channel);
  const ch = RAW_CH_TO_DASH_CH[rawCh];
  if (!ch) { if (rawCh) unrecognizedChannel[rawCh] = (unrecognizedChannel[rawCh]||0) + 1; continue; }
@@ -767,10 +785,9 @@ function parseLowerFunnelLog(rows){
  bySegChDate[seg][ch][dateStr].created += v.created;
  bySegChDate[seg][ch][dateStr].paidOut += v.paidOut;
  bySegChDate[seg][ch][dateStr].paidOutAmount += v.paidOutAmount;
- if (!maxDate || dateStr > maxDate) maxDate = dateStr;
  }
  }
- return { bySeg, bySegCh, bySegChDate, maxDate, unrecognizedSeg, unrecognizedChannel, missingColumns: missing, totalRowsRead: rows.length - dataStart, dateParseFailCount, dateParseFailSamples, monthMismatchCount, monthMismatchSamples };
+ return { bySeg, bySegCh, bySegDate, bySegChDate, maxDate, unrecognizedSeg, unrecognizedChannel, missingColumns: missing, totalRowsRead: rows.length - dataStart, dateParseFailCount, dateParseFailSamples, monthMismatchCount, monthMismatchSamples };
 }
 
 // ---- FORECAST: linear regression on the current (in-progress) month's daily cumulative totals,
@@ -794,38 +811,51 @@ function linearForecastMonthEnd(dailySeries /* [{day, value}] for every elapsed 
 }
 // Builds the 0-filled daily series for the selected segments/channels, for the given metric, up to
 // (and including) elapsedDay of the given month/year.
-function buildDailySeries(bySegChDate, segArr, chArr, year, month, elapsedDay, metric){
+function buildDailySeries(bySegDate, bySegChDate, segArr, chArr, year, month, elapsedDay, metric){
+ const allChSelected = chArr.length >= ALL_CHANNELS.length;
  const series = [];
  for (let d = 1; d <= elapsedDay; d++) {
  const dateStr = `${year}-${String(month).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
  let v = 0;
+ if (allChSelected) {
+ segArr.forEach(seg => { const rec = bySegDate[seg] && bySegDate[seg][dateStr]; if (rec) v += rec[metric] || 0; });
+ } else {
  segArr.forEach(seg => chArr.forEach(ch => {
  const rec = bySegChDate[seg] && bySegChDate[seg][ch] && bySegChDate[seg][ch][dateStr];
  if (rec) v += rec[metric] || 0;
  }));
+ }
  series.push({ day: d, value: v });
  }
  return series;
 }
 // The freshest date within just the selected segments/channels - NOT the whole dataset's max date.
 // Using a global max date here would let one stray row in an unrelated segment/channel (or a typo'd
-// date) silently hijack the "as of" reference for every forecast, regardless of filter.
-function maxDateForFilter(bySegChDate, segArr, chArr){
+// date) silently hijack the "as of" reference for every forecast, regardless of filter. Uses the
+// channel-agnostic bySegDate when all channels are selected, so a row with an unrecognized channel
+// value doesn't get silently excluded from "as of today" the way it would if only bySegChDate (which
+// requires a recognized channel) were consulted.
+function maxDateForFilter(bySegDate, bySegChDate, segArr, chArr){
  let max = null;
+ const allChSelected = chArr.length >= ALL_CHANNELS.length;
+ if (allChSelected) {
+ segArr.forEach(seg => { const d = bySegDate[seg]; if (d) Object.keys(d).forEach(k => { if (!max || k > max) max = k; }); });
+ } else {
  segArr.forEach(seg => chArr.forEach(ch => {
  const chData = bySegChDate[seg] && bySegChDate[seg][ch];
  if (chData) Object.keys(chData).forEach(d => { if (!max || d > max) max = d; });
  }));
+ }
  return max;
 }
-function computeForecast(bySegChDate, maxDate, segArr, chArr){
+function computeForecast(bySegDate, bySegChDate, maxDate, segArr, chArr){
  if (!maxDate) return null;
  const [y, m, d] = maxDate.split('-').map(Number);
  const total = daysInMonth(y, m);
  const metrics = ["created","paidOut","paidOutAmount"];
  const out = { year:y, month:m, asOfDay:d, daysInMonth: total, monthLabel: MONTHS_FULL[m-1] || `Bulan ${m}` };
  metrics.forEach(metric => {
- const series = buildDailySeries(bySegChDate, segArr, chArr, y, m, d, metric);
+ const series = buildDailySeries(bySegDate, bySegChDate, segArr, chArr, y, m, d, metric);
  const mtdActual = series.reduce((s,p)=>s+p.value,0);
  out[metric] = { mtdActual, forecast: linearForecastMonthEnd(series, total) };
  });
@@ -833,12 +863,17 @@ function computeForecast(bySegChDate, maxDate, segArr, chArr){
 }
 
 // ---- CUSTOM DATE RANGE helpers ----
-function dailyValueForDate(bySegChDate, segArr, chArr, dateStr, metric){
+function dailyValueForDate(bySegDate, bySegChDate, segArr, chArr, dateStr, metric){
+ const allChSelected = chArr.length >= ALL_CHANNELS.length;
  let v = 0;
+ if (allChSelected) {
+ segArr.forEach(seg => { const rec = bySegDate[seg] && bySegDate[seg][dateStr]; if (rec) v += rec[metric] || 0; });
+ } else {
  segArr.forEach(seg => chArr.forEach(ch => {
  const rec = bySegChDate[seg] && bySegChDate[seg][ch] && bySegChDate[seg][ch][dateStr];
  if (rec) v += rec[metric] || 0;
  }));
+ }
  return v;
 }
 function dateRangeList(dateFrom, dateTo){
@@ -848,18 +883,23 @@ function dateRangeList(dateFrom, dateTo){
  while (d <= to) { list.push(d.toISOString().slice(0,10)); d.setDate(d.getDate()+1); }
  return list;
 }
-function sumDateRange(bySegChDate, segArr, chArr, dateFrom, dateTo, metric){
+function sumDateRange(bySegDate, bySegChDate, segArr, chArr, dateFrom, dateTo, metric){
  const dates = dateRangeList(dateFrom, dateTo);
  let total = 0;
- dates.forEach(dateStr => { total += dailyValueForDate(bySegChDate, segArr, chArr, dateStr, metric); });
+ dates.forEach(dateStr => { total += dailyValueForDate(bySegDate, bySegChDate, segArr, chArr, dateStr, metric); });
  return { total, days: dates.length };
 }
-function allDatesInData(bySegChDate, segArr, chArr){
+function allDatesInData(bySegDate, bySegChDate, segArr, chArr){
  const set = new Set();
+ const allChSelected = chArr.length >= ALL_CHANNELS.length;
+ if (allChSelected) {
+ segArr.forEach(seg => { const d = bySegDate[seg]; if (d) Object.keys(d).forEach(k => set.add(k)); });
+ } else {
  segArr.forEach(seg => chArr.forEach(ch => {
  const chData = bySegChDate[seg] && bySegChDate[seg][ch];
  if (chData) Object.keys(chData).forEach(d => set.add(d));
  }));
+ }
  return Array.from(set).sort();
 }
 
@@ -946,12 +986,13 @@ function channelEfficiencyRanking(seg){
  const srcSeg = COST_SOURCE_SEG[seg];
  if (!srcSeg || !CHANNEL_DETAIL[seg]) return null;
  const results = [];
+ const lastIdx = NUM_MONTHS - 1; // 0-indexed latest month
  ["WhatsApp","Email","Push","SalesAI"].forEach(ch => {
  const createdArr = CHANNEL_DETAIL[seg][ch] && CHANNEL_DETAIL[seg][ch].created;
  const costArr = COST_BY_CHANNEL[seg] && COST_BY_CHANNEL[seg][ch];
- if (!createdArr || createdArr[6] == null) return;
- const created = createdArr[6];
- const cost = costArr ? costArr[6] : null;
+ if (!createdArr || createdArr[lastIdx] == null) return;
+ const created = createdArr[lastIdx];
+ const cost = costArr ? costArr[lastIdx] : null;
  if (cost == null || !created) return;
  results.push({ ch, created, cost, costPerCreated: cost/created });
  });
@@ -1030,7 +1071,7 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  const SEGS = ALL_SEGMENTS;
  const { agg: upperIdx, unrecognizedSeg: upperUnrecognizedSeg, unrecognizedChannel: upperUnrecognizedChannel, missingColumns: upperMissingColumns } = buildUpperIndex(upperRows);
  const costIdx = buildCostIndex(costRows);
- const { bySeg: lowerAgg, bySegCh: lowerAggCh, bySegChDate, maxDate, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, monthMismatchCount, monthMismatchSamples } = parseLowerFunnelLog(lowerRows);
+ const { bySeg: lowerAgg, bySegCh: lowerAggCh, bySegDate, bySegChDate, maxDate, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, monthMismatchCount, monthMismatchSamples } = parseLowerFunnelLog(lowerRows);
  const { bySeg: targetAgg, missingColumns: targetMissingColumns, unrecognizedSeg: targetUnrecognizedSeg, unrecognizedMonth: targetUnrecognizedMonth, unrecognizedFunnel: targetUnrecognizedFunnel } = parseTargetLog(targetRows);
  const numMonths = detectNumMonths(lowerAgg, targetAgg);
  const LAST_M = numMonths, PREV_M = numMonths - 1; // "current" and "previous" month, dynamically - replaces old hardcoded Jul(7)/Jun(6)
@@ -1165,7 +1206,7 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
 
  return { trend, cost, cpa, poAmountCost, channel, channelEngage, budgetAug, channelDetail, costByChannel, augCost, waStats,
  numMonths,
- forecastSource: { bySegChDate, maxDate },
+ forecastSource: { bySegChDate, bySegDate, maxDate },
  targetAgg,
  debug: { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, monthMismatchCount, monthMismatchSamples, targetMissingColumns, targetUnrecognizedSeg, targetUnrecognizedMonth, targetUnrecognizedFunnel, upperUnrecognizedSeg, upperUnrecognizedChannel, upperMissingColumns, upperIdx, costIdx } };
 }
@@ -1515,8 +1556,8 @@ function renderForecast(f){
  document.getElementById("forecastFIR").innerHTML = "";
  return;
  }
- const filteredMaxDate = maxDateForFilter(FORECAST_SOURCE.bySegChDate, f.seg, f.ch);
- const fc = computeForecast(FORECAST_SOURCE.bySegChDate, filteredMaxDate, f.seg, f.ch);
+ const filteredMaxDate = maxDateForFilter(FORECAST_SOURCE.bySegDate, FORECAST_SOURCE.bySegChDate, f.seg, f.ch);
+ const fc = computeForecast(FORECAST_SOURCE.bySegDate, FORECAST_SOURCE.bySegChDate, filteredMaxDate, f.seg, f.ch);
  if (!fc) { box.innerHTML = `<p class='note'>Tidak ada data untuk kombinasi filter ini.</p>`; document.getElementById("forecastFIR").innerHTML = ""; return; }
 
  titleEl.textContent = ` Forecast Akhir ${fc.monthLabel} (data s.d. tanggal ${fc.asOfDay})`;
@@ -1539,7 +1580,7 @@ function renderForecast(f){
  </div>`).join("")}</div>
  <p class='note' style='margin-top:10px;'>Metode: regresi linear least-squares atas kurva kumulatif harian bulan berjalan (bukan cuma rata-rata run-rate) - menangkap kalau pace-nya lagi naik/turun, bukan diasumsikan rata terus. Kalau data harian baru sedikit (awal bulan), forecast masih kasar dan akan makin stabil seiring lebih banyak hari terlewati.</p>`;
 
- const createdSeries = buildDailySeries(FORECAST_SOURCE.bySegChDate, f.seg, f.ch, fc.year, fc.month, fc.asOfDay, "created");
+ const createdSeries = buildDailySeries(FORECAST_SOURCE.bySegDate, FORECAST_SOURCE.bySegChDate, f.seg, f.ch, fc.year, fc.month, fc.asOfDay, "created");
  const r2 = regressionRSquared(createdSeries);
  const growthVsMtd = fc.created.mtdActual ? (fc.created.forecast - fc.created.mtdActual) / fc.created.mtdActual : null;
  let confText, confLevel;
@@ -1573,10 +1614,10 @@ function renderCustomRange(f){
  firEl.innerHTML = "";
  return;
  }
- const { bySegChDate } = FORECAST_SOURCE;
+ const { bySegDate, bySegChDate } = FORECAST_SOURCE;
  const metrics = ["created","paidOut","paidOutAmount"];
  const results = {};
- metrics.forEach(m => { results[m] = sumDateRange(bySegChDate, f.seg, f.ch, f.dateFrom, f.dateTo, m); });
+ metrics.forEach(m => { results[m] = sumDateRange(bySegDate, bySegChDate, f.seg, f.ch, f.dateFrom, f.dateTo, m); });
 
  const fmtDate = (s) => s.split('-').reverse().join('/');
  document.getElementById("customRangeTitle").textContent = ` Rentang Tanggal Custom: ${fmtDate(f.dateFrom)} - ${fmtDate(f.dateTo)} (${results.created.days} hari)`;
@@ -1600,7 +1641,7 @@ function renderCustomRange(f){
  const days = dateRangeList(f.dateFrom, f.dateTo);
  const dayRows = days.map(dateStr => {
  const dayNum = Number(dateStr.slice(8,10));
- const created = dailyValueForDate(bySegChDate, f.seg, f.ch, dateStr, "created");
+ const created = dailyValueForDate(bySegDate, bySegChDate, f.seg, f.ch, dateStr, "created");
  const pctOfTarget = dailyTargetCreated ? created/dailyTargetCreated : null;
  return { dateStr, dayNum, created, pctOfTarget, band: weekBandLabel(dayNum) };
  });
@@ -1641,9 +1682,9 @@ function renderCustomRange(f){
  // dataset) - comparing against other months would dilute a genuine within-month dip, exactly the
  // issue that made a bad week look "normal" before this fix. ----
  const sameMonthPrefix = `${rangeYear}-${String(rangeMonthNum).padStart(2,'0')}`;
- const allDatesSameMonth = allDatesInData(bySegChDate, f.seg, f.ch).filter(d => d.startsWith(sameMonthPrefix));
+ const allDatesSameMonth = allDatesInData(bySegDate, bySegChDate, f.seg, f.ch).filter(d => d.startsWith(sameMonthPrefix));
  const inRangeSet = new Set(days);
- const outsideDailyCreated = allDatesSameMonth.filter(d => !inRangeSet.has(d)).map(d => dailyValueForDate(bySegChDate, f.seg, f.ch, d, "created"));
+ const outsideDailyCreated = allDatesSameMonth.filter(d => !inRangeSet.has(d)).map(d => dailyValueForDate(bySegDate, bySegChDate, f.seg, f.ch, d, "created"));
 
  const avgInRange = results.created.total / results.created.days;
  const belowTargetDays = dayRows.filter(d => d.pctOfTarget != null && d.pctOfTarget < 1);
@@ -1722,9 +1763,9 @@ function renderKPIs(f){
  document.getElementById("kpiRow").innerHTML = `<div class='kpi'><div class='l'>Rentang Tanggal Custom</div><div class='s neg'>Tanggal "Dari" harus sebelum "Sampai".</div></div>`;
  return;
  }
- const { bySegChDate } = FORECAST_SOURCE;
- const created = sumDateRange(bySegChDate, list, chSelArr, f.dateFrom, f.dateTo, "created");
- const paidOut = sumDateRange(bySegChDate, list, chSelArr, f.dateFrom, f.dateTo, "paidOut");
+ const { bySegDate, bySegChDate } = FORECAST_SOURCE;
+ const created = sumDateRange(bySegDate, bySegChDate, list, chSelArr, f.dateFrom, f.dateTo, "created");
+ const paidOut = sumDateRange(bySegDate, bySegChDate, list, chSelArr, f.dateFrom, f.dateTo, "paidOut");
  const rangeLabel = `${f.dateFrom.split('-').reverse().join('/')} - ${f.dateTo.split('-').reverse().join('/')}`;
  const cards = [
  { l:`Created - ${rangeLabel}${chLabel}`, v: created.days ? nf(created.total) : "-", s: created.days ? `${created.days} hari, rata-rata ${(created.total/created.days).toFixed(1)}/hari` : "Rentang tidak valid", cls:"neu" },
@@ -1921,9 +1962,9 @@ function renderKPIFIR(f){
 
  if (f.dateFrom && f.dateTo) {
  if (!FORECAST_SOURCE || !FORECAST_SOURCE.bySegChDate || f.dateFrom > f.dateTo) { el.innerHTML = ""; return; }
- const { bySegChDate } = FORECAST_SOURCE;
- const created = sumDateRange(bySegChDate, list, f.ch, f.dateFrom, f.dateTo, "created");
- const paidOut = sumDateRange(bySegChDate, list, f.ch, f.dateFrom, f.dateTo, "paidOut");
+ const { bySegDate, bySegChDate } = FORECAST_SOURCE;
+ const created = sumDateRange(bySegDate, bySegChDate, list, f.ch, f.dateFrom, f.dateTo, "created");
+ const paidOut = sumDateRange(bySegDate, bySegChDate, list, f.ch, f.dateFrom, f.dateTo, "paidOut");
  if (!created.days) { el.innerHTML = firHtml("Rentang tanggal tidak valid.","-","-"); return; }
  const findings = `Created total ${nf(created.total)}, Paid Out total ${nf(paidOut.total)} selama ${created.days} hari (${f.dateFrom.split('-').reverse().join('/')} - ${f.dateTo.split('-').reverse().join('/')}).`;
  el.innerHTML = firHtml(findings,
@@ -2099,7 +2140,7 @@ function renderTrendChart(f){
  const mLabel = METRIC_LABEL[driver.metric];
  if (driver.achievement != null) {
  const av = achievementVerdict(driver.achievement);
- if (av.level === "bad") return `${sa.seg}: ${mLabel} cuma ${pct(driver.achievement,0)} dari target Jul - Action: percepat sekarang, naikkan budget/volume kirim dan cek tahap funnel yang macet.`;
+ if (av.level === "bad") return `${sa.seg}: ${mLabel} cuma ${pct(driver.achievement,0)} dari target ${lastML} - Action: percepat sekarang, naikkan budget/volume kirim dan cek tahap funnel yang macet.`;
  if (av.level === "warn") return `${sa.seg}: ${mLabel} ${pct(driver.achievement,0)} dari target - Action: masih bisa dikejar, naikkan pace +10-15%.`;
  if (av.level === "info") return `${sa.seg}: ${mLabel} ${pct(driver.achievement,0)} dari target - Action: pertahankan pace, hampir sampai.`;
  return `${sa.seg}: ${mLabel} sudah capai target (${pct(driver.achievement,0)}) - Action: pertahankan, pertimbangkan naikkan target berikutnya.`;
@@ -2227,9 +2268,9 @@ function renderChannelEngageChart(f){
  let readPart = "";
  if (openJun && openJul && deliveredJun && deliveredJul) {
  const readTest = twoProportionZTest(openJul, deliveredJul, openJun, deliveredJun);
- readPart = ` Read rate: ${pct(readTest.p2,2)} (Jun) → ${pct(readTest.p1,2)} (Jul), ${zVerdict(readTest.z).text} (z=${readTest.z.toFixed(2)}).`;
+ readPart = ` Read rate: ${pct(readTest.p2,2)} (${prevMonthLabel}) → ${pct(readTest.p1,2)} (${lastMonthLabel}), ${zVerdict(readTest.z).text} (z=${readTest.z.toFixed(2)}).`;
  }
- const findings = `Delivery rate: ${pct(delivTest.p2,2)} (Jun) → ${pct(delivTest.p1,2)} (Jul). Click rate (dari Sent): ${pct(clickTest.p2,2)} (Jun) → ${pct(clickTest.p1,2)} (Jul).${readPart}`;
+ const findings = `Delivery rate: ${pct(delivTest.p2,2)} (${prevMonthLabel}) → ${pct(delivTest.p1,2)} (${lastMonthLabel}). Click rate (dari Sent): ${pct(clickTest.p2,2)} (${prevMonthLabel}) → ${pct(clickTest.p1,2)} (${lastMonthLabel}).${readPart}`;
  const insight = `Perubahan delivery rate ${delivV.text} (z=${delivTest.z.toFixed(2)}). Perubahan click rate ${clickV.text} (z=${clickTest.z.toFixed(2)}).`;
  const delivTier = zTier(delivTest.z), clickTier = zTier(clickTest.z);
  let recommendation;
@@ -2290,13 +2331,13 @@ function renderCpaChart(f){
  const rows = list.map((seg,i) => (jun[i] && jul[i]!=null) ? { seg, jun: jun[i], jul: jul[i], change: (jul[i]-jun[i])/jun[i] } : null).filter(Boolean);
  if (!rows.length) { el.innerHTML = firHtml("Data CPA belum lengkap untuk dibandingkan.","-","-"); }
  else {
- const findings = rows.map(r => `${r.seg}: CPA ${rp(r.jun)} (Jun) → ${rp(r.jul)} (Jul), ${r.change>=0?'+':''}${pct(r.change,1)}`).join('; ') + '.';
+ const findings = rows.map(r => `${r.seg}: CPA ${rp(r.jun)} (${prevMonthLabel}) → ${rp(r.jul)} (${lastMonthLabel}), ${r.change>=0?'+':''}${pct(r.change,1)}`).join('; ') + '.';
  // Only 2 data points -> no real z-test possible (need >=3 for a variance estimate). Use tiered
  // materiality bands instead: >30% = act now, 15-30% = watch, <15% = stable.
  rows.forEach(r => { const a = Math.abs(r.change); r.tier = a > 0.3 ? "strong" : (a > 0.15 ? "watch" : "stable"); });
  const acted = rows.filter(r => r.tier === "strong");
  const watching = rows.filter(r => r.tier === "watch");
- const insight = `Cuma ada 2 titik data (Jun, Jul), jadi belum bisa dijalanin uji signifikansi statistik beneran (butuh min. 3 titik buat estimasi variasi normal) - jadi dipakai ambang materialitas bertingkat (>30% = perlu tindakan, 15-30% = waspada) sebagai gantinya.` +
+ const insight = `Cuma ada 2 titik data (${prevMonthLabel}, ${lastMonthLabel}), jadi belum bisa dijalanin uji signifikansi statistik beneran (butuh min. 3 titik buat estimasi variasi normal) - jadi dipakai ambang materialitas bertingkat (>30% = perlu tindakan, 15-30% = waspada) sebagai gantinya.` +
  (acted.length ? ` ${acted.map(r=>r.seg).join(', ')} berubah >30%.` : '') +
  (watching.length ? ` ${watching.map(r=>r.seg).join(', ')} di zona waspada (15-30%).` : '') +
  (!acted.length && !watching.length ? ` Semua segmen di bawah 15%, relatif stabil.` : '');
@@ -2354,7 +2395,7 @@ function renderBudgetChart(f){
  const totalDownside = list.reduce((s,seg)=>s+((BUDGET_AUG[seg]&&BUDGET_AUG[seg].budgetDownside)||0),0);
  const riskEl = document.getElementById("budgetRisk");
  if (totalDownside > 500000000) {
- riskEl.innerHTML = `<b>Risiko:</b> kalau tren CPC Juli berlanjut, budget riil bisa naik ke ${rpJt(totalDownside)} - lewat cap Rp500jt sebesar ${rpJt(totalDownside-500000000)}.`;
+ riskEl.innerHTML = `<b>Risiko:</b> kalau tren CPC ${lastMonthLabel} berlanjut, budget riil bisa naik ke ${rpJt(totalDownside)} - lewat cap Rp500jt sebesar ${rpJt(totalDownside-500000000)}.`;
  } else {
  riskEl.innerHTML = `<b>Aman:</b> skenario downside (${rpJt(totalDownside)}) masih di bawah cap Rp500jt.`;
  }
@@ -2720,8 +2761,9 @@ function renderChannelTable(f){
  const chList = chans(f.ch);
  const rows = CHANNEL.filter(r => (f.seg.includes(r.seg)) && chList.includes(r.ch));
  const recLabel = { up: ["Kuatkan","up"], hold: ["Tahan/Monitor","hold"], fix: ["Fix dulu","fix"] };
+ const prevML = MONTHS[NUM_MONTHS-2] || MONTHS[0], lastML = MONTHS[NUM_MONTHS-1];
  let html = `<thead><tr>
- <th>Segmen</th><th>Channel</th><th class='num'>CPC Jun</th><th class='num'>CPC Jul</th><th class='num'>Delta</th><th>Catatan</th><th>Rekomendasi</th>
+ <th>Segmen</th><th>Channel</th><th class='num'>CPC ${prevML}</th><th class='num'>CPC ${lastML}</th><th class='num'>Delta</th><th>Catatan</th><th>Rekomendasi</th>
  </tr></thead><tbody>`;
  if (rows.length === 0) {
  html += `<tr><td colspan='7' style='text-align:center;color:var(--muted);padding:16px;'>Tidak ada data untuk kombinasi filter ini</td></tr>`;
@@ -2747,9 +2789,10 @@ function renderChannelTable(f){
 // ===================== COST RATIO TABLE =====================
 function renderCostRatioTable(f){
  const list = costSegs(f.seg);
+ const prevML = MONTHS[NUM_MONTHS-2] || MONTHS[0], lastML = MONTHS[NUM_MONTHS-1];
  let html = `<thead><tr>
- <th>Segmen</th><th class='num'>Paid Out Amount Jun</th><th class='num'>Cost Jun</th><th class='num'>Cost Ratio Jun</th>
- <th class='num'>Paid Out Amount Jul</th><th class='num'>Cost Jul</th><th class='num'>Cost Ratio Jul</th>
+ <th>Segmen</th><th class='num'>Paid Out Amount ${prevML}</th><th class='num'>Cost ${prevML}</th><th class='num'>Cost Ratio ${prevML}</th>
+ <th class='num'>Paid Out Amount ${lastML}</th><th class='num'>Cost ${lastML}</th><th class='num'>Cost Ratio ${lastML}</th>
  </tr></thead><tbody>`;
  if (!list.length) html += `<tr><td colspan='7' style='text-align:center;color:var(--muted);padding:16px;'>Tidak ada segmen dengan data Cost pada filter ini</td></tr>`;
  list.forEach(seg => {
@@ -2784,10 +2827,10 @@ function renderCostRatioTable(f){
  else {
  const rJun = junCost/junAmt, rJul = julCost/julAmt;
  const change = (rJul-rJun)/rJun;
- const findings = `Cost Ratio (pooled, segmen terpilih): ${pct(rJun,2)} (Jun) → ${pct(rJul,2)} (Jul), ${change>=0?'+':''}${pct(change,1)}. Return (Paid Out Amount / Cost): ${(1/rJun).toFixed(1)}x → ${(1/rJul).toFixed(1)}x.`;
+ const findings = `Cost Ratio (pooled, segmen terpilih): ${pct(rJun,2)} (${prevML}) → ${pct(rJul,2)} (${lastML}), ${change>=0?'+':''}${pct(change,1)}. Return (Paid Out Amount / Cost): ${(1/rJun).toFixed(1)}x → ${(1/rJul).toFixed(1)}x.`;
  const absC = Math.abs(change);
  const tier = absC > 0.2 ? "strong" : (absC > 0.1 ? "watch" : "stable");
- const insight = `Cuma 2 titik data (Jun, Jul) - belum bisa diuji signifikansi statistiknya secara formal, jadi dipakai ambang materialitas bertingkat (>20% = perlu tindakan, 10-20% = waspada).` +
+ const insight = `Cuma 2 titik data (${prevML}, ${lastML}) - belum bisa diuji signifikansi statistiknya secara formal, jadi dipakai ambang materialitas bertingkat (>20% = perlu tindakan, 10-20% = waspada).` +
  (tier === "strong" ? ` Perubahan ${pct(absC,1)} ini di atas ambang tindakan.` : (tier === "watch" ? ` Perubahan ${pct(absC,1)} ini di zona waspada.` : ` Perubahan masih di bawah 10%, relatif stabil.`));
  let recommendation;
  if (tier === "strong") {
@@ -2849,7 +2892,7 @@ function renderBudgetAlert(f){
  <div class='balert-msg ${msgClass}'><span>${icon}</span><div><b>${title}</b><br>${desc}</div></div>
  <div class='balert-stats'>
  <div>Terpakai<b>${rpJt(used)}</b></div>
- <div>Alokasi (basis Jun)<b>${rpJt(planned)}</b></div>
+ <div>Alokasi (basis ${MONTHS[NUM_MONTHS-2] || MONTHS[0]})<b>${rpJt(planned)}</b></div>
  <div>Sisa<b>${rpJt(Math.max(planned-used,0))}</b></div>
  <div>% Terpakai<b>${pct.toFixed(1).replace('.',',')}%</b></div>
  </div>
@@ -2868,7 +2911,7 @@ function renderPacingStrategy(seg, weeks, totalW, budget, targetCreatedInput, ta
  if (ranking && ranking.length) {
  const best = ranking[0];
  const waEntry = ranking.find(r => r.ch === "WhatsApp");
- let channelText = `Ranking efisiensi channel segmen ${seg} (Rp per Created, data Jul): ${ranking.map(r=>`${CH_DISPLAY[r.ch]||r.ch} ${rp(r.costPerCreated)}`).join(' &lt; ')}.`;
+ let channelText = `Ranking efisiensi channel segmen ${seg} (Rp per Created, data ${MONTHS[NUM_MONTHS-1]}): ${ranking.map(r=>`${CH_DISPLAY[r.ch]||r.ch} ${rp(r.costPerCreated)}`).join(' &lt; ')}.`;
  if (waEntry && best.ch !== "WhatsApp") {
  channelText += ` <b>${CH_DISPLAY[best.ch]||best.ch} lebih efisien dari WhatsApp</b> (${rp(best.costPerCreated)} vs ${rp(waEntry.costPerCreated)} per Created) - pertimbangkan geser 10-15% budget dari WhatsApp ke situ buat uji coba, meski WhatsApp tetap relevan buat skala/reach volume besar.`;
  } else {
@@ -2910,7 +2953,7 @@ function renderPacingStrategy(seg, weeks, totalW, budget, targetCreatedInput, ta
  if (!parts.length) parts.push(`Delivery, Read, dan Click rate semuanya stabil dalam rentang wajar bulan ini - nggak ada red flag di sisi engagement, fokus optimasi bisa dialihkan ke volume/budget dulu.`);
  sections.push({ title: "Delivery / Read / Click Rate & Rekomendasi Konten", body: parts.join('<br><br>') });
  } else {
- sections.push({ title: "Delivery / Read / Click Rate", body: `Belum cukup data Jun-Jul untuk channel WhatsApp segmen ini buat dianalisis.` });
+ sections.push({ title: "Delivery / Read / Click Rate", body: `Belum cukup data ${MONTHS[NUM_MONTHS-2] || MONTHS[0]}-${MONTHS[NUM_MONTHS-1]} untuk channel WhatsApp segmen ini buat dianalisis.` });
  }
 
  box.innerHTML = `
