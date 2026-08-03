@@ -275,7 +275,7 @@
  <section class="row" style="grid-template-columns:1fr;">
  <div class="card">
  <h3 id="engageTitle">Engagement per Channel</h3>
- <div class="cap" id="channelEngageCap">Sent / Delivered / Click, mengikuti filter Segmen & Channel (data granular hanya tersedia Jun-Jul)</div>
+ <div class="cap" id="channelEngageCap">Sent / Delivered / Click, mengikuti filter Segmen &amp; Channel</div>
  <div class="chart-box"><canvas id="channelEngageChart"></canvas></div>
  <div id="channelEngageFIR"></div>
  </div>
@@ -591,46 +591,49 @@ function findLabelRow(rows, label, fromRow0, toRow0){
  return -1;
 }
 
-const UPPER_SEG_LABEL = { "New": "New", "Repeat+TopUp": "Repeat + Top Up", "LMT": "Repeat LMT" };
-const UPPER_CH_LABELS = ["Whatsapp", "Email", "Push Notification"];
-const UPPER_CH_KEY = { "Whatsapp": "WhatsApp", "Email": "Email", "Push Notification": "Push" };
+// Upper Funnel is now a raw daily log (like Lower Funnel), not a pivot table. Columns used:
+// Sent Date | Segment 2 | Channel 1 | Sent | Delivered | Read | Click (any order, header-matched).
+// "Segment 2" already collapses to the same 3 buckets Cost Detail uses (New / "Repeat + Top Up" /
+// LMT) - not the dashboard's 5 segments - so this maps straight onto COST_SOURCE_SEG's key space.
+// Rows with Segment 2="Lainnya" or Channel 1="Lainnya" are intentionally uncategorized noise (per
+// user confirmation) and are skipped without a warning; anything else unrecognized IS warned about.
+const UPPER_LOG_LABELS = { date:"Sent Date", segment:"Segment 2", channel:"Channel 1", sent:"Sent", delivered:"Delivered", read:"Read", click:"Click" };
+const UPPER_SEG_TO_SRC = { "New":"New", "Repeat + Top Up":"Repeat+TopUp", "LMT":"LMT" };
+const UPPER_CH_TO_DASH = { "Push Notification":"Push", "Email":"Email", "WhatsApp":"WhatsApp", "Sales AI":"SalesAI" };
 
-// Upper Funnel & Cost Detail masih pakai format pivot lama, dan cuma punya 3 blok segmen:
-// New / gabungan Repeat+TopUp / LMT - lihat COST_SOURCE_SEG di atas untuk pemetaannya.
+// Upper Funnel & Cost Detail: Cost Detail is still the old pivot format with 3 segment blocks -
+// see COST_SOURCE_SEG above for the New / Repeat+TopUp / LMT mapping.
 const COST_SEG_LABEL = { "New": "New", "Repeat+TopUp": "Repeat + Top Up", "LMT": "LMT" };
 
 function buildUpperIndex(rows){
- const segKeys = Object.keys(UPPER_SEG_LABEL);
- const segStart = {};
- segKeys.forEach(k => { segStart[k] = findLabelRow(rows, UPPER_SEG_LABEL[k], 0, rows.length); });
- const idx = {};
- segKeys.forEach(segKey => {
- const start = segStart[segKey];
- if (start < 0) { idx[segKey] = null; return; }
- let end = rows.length;
- segKeys.forEach(o => { const s = segStart[o]; if (o !== segKey && s > start && s < end) end = s; });
- idx[segKey] = {};
- UPPER_CH_LABELS.forEach(chLabel => {
- const chStart = findLabelRow(rows, chLabel, start, end);
- if (chStart < 0) { idx[segKey][UPPER_CH_KEY[chLabel]] = null; return; }
- let chEnd = end;
- UPPER_CH_LABELS.forEach(o => { if (o !== chLabel) { const s = findLabelRow(rows, o, chStart + 1, end); if (s >= 0 && s < chEnd) chEnd = s; } });
- const funnelHdr = findLabelRow(rows, "Funnel", chStart, chEnd);
- const from = funnelHdr >= 0 ? funnelHdr + 1 : chStart;
- let clickRow = findLabelRow(rows, "Click", from, chEnd);
- if (clickRow < 0) clickRow = findLabelRow(rows, "Click / Open", from, chEnd);
- let openRow = findLabelRow(rows, "Open / Read", from, chEnd);
- if (openRow < 0) openRow = findLabelRow(rows, "Open", from, chEnd);
- idx[segKey][UPPER_CH_KEY[chLabel]] = {
- sent: findLabelRow(rows, "Sent", from, chEnd),
- delivered: findLabelRow(rows, "Delivered", from, chEnd),
- click: clickRow,
- open: openRow,
- created: findLabelRow(rows, "Created", from, chEnd),
+ const { dataStart, col, missing } = resolveColumnsByHeader(rows, UPPER_LOG_LABELS);
+ const agg = {}; // agg[srcSeg][ch][month] = {sent, delivered, click, open}
+ const unrecognizedSeg = {}, unrecognizedChannel = {};
+ for (let i = dataStart; i < rows.length; i++) {
+ const rawSeg = cellAtCol(rows, i, col.segment);
+ if (!rawSeg) continue;
+ const srcSeg = UPPER_SEG_TO_SRC[rawSeg];
+ if (!srcSeg) { if (rawSeg !== "Lainnya") unrecognizedSeg[rawSeg] = (unrecognizedSeg[rawSeg]||0)+1; continue; }
+ const rawCh = cellAtCol(rows, i, col.channel);
+ const ch = UPPER_CH_TO_DASH[rawCh];
+ if (!ch) { if (rawCh && rawCh !== "Lainnya") unrecognizedChannel[rawCh] = (unrecognizedChannel[rawCh]||0)+1; continue; }
+ const rawDate = cellAtCol(rows, i, col.date);
+ const dateMatch = rawDate.match(/^(\d{4})[-\/](\d{2})[-\/](\d{2})/);
+ if (!dateMatch) continue;
+ const month = parseInt(dateMatch[2], 10);
+ if (!month || month < 1 || month > 12) continue;
+ const v = {
+ sent: valAtCol(rows, i, col.sent) || 0,
+ delivered: valAtCol(rows, i, col.delivered) || 0,
+ click: valAtCol(rows, i, col.click) || 0,
+ open: valAtCol(rows, i, col.read) || 0,
  };
- });
- });
- return idx;
+ agg[srcSeg] = agg[srcSeg] || {};
+ agg[srcSeg][ch] = agg[srcSeg][ch] || {};
+ agg[srcSeg][ch][month] = agg[srcSeg][ch][month] || { sent:0, delivered:0, click:0, open:0 };
+ Object.keys(v).forEach(k => agg[srcSeg][ch][month][k] += v[k]);
+ }
+ return { agg, unrecognizedSeg, unrecognizedChannel, missingColumns: missing, totalRowsRead: rows.length - dataStart };
 }
 
 function buildCostIndex(rows){
@@ -649,12 +652,10 @@ function buildCostIndex(rows){
 }
 
 function upperVal(upperRows, upperIdx, seg, ch, metric, month){
- const segIdx = upperIdx[seg];
- if (!segIdx || !segIdx[ch]) return null;
- const row0 = segIdx[ch][metric];
- if (row0 == null || row0 < 0) return null;
- const col = 1 + month;
- return valAt(upperRows, row0, col);
+ const rec = upperIdx[seg] && upperIdx[seg][ch] && upperIdx[seg][ch][month];
+ if (!rec) return null;
+ const v = rec[metric];
+ return v == null ? null : v;
 }
 function costVal(costRows, costIdx, seg, type, month){
  const segIdx = costIdx[seg];
@@ -1027,7 +1028,7 @@ function detectNumMonths(lowerAgg, targetAgg){
 
 function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  const SEGS = ALL_SEGMENTS;
- const upperIdx = buildUpperIndex(upperRows);
+ const { agg: upperIdx, unrecognizedSeg: upperUnrecognizedSeg, unrecognizedChannel: upperUnrecognizedChannel, missingColumns: upperMissingColumns } = buildUpperIndex(upperRows);
  const costIdx = buildCostIndex(costRows);
  const { bySeg: lowerAgg, bySegCh: lowerAggCh, bySegChDate, maxDate, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, monthMismatchCount, monthMismatchSamples } = parseLowerFunnelLog(lowerRows);
  const { bySeg: targetAgg, missingColumns: targetMissingColumns, unrecognizedSeg: targetUnrecognizedSeg, unrecognizedMonth: targetUnrecognizedMonth, unrecognizedFunnel: targetUnrecognizedFunnel } = parseTargetLog(targetRows);
@@ -1166,7 +1167,7 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  numMonths,
  forecastSource: { bySegChDate, maxDate },
  targetAgg,
- debug: { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, monthMismatchCount, monthMismatchSamples, targetMissingColumns, targetUnrecognizedSeg, targetUnrecognizedMonth, targetUnrecognizedFunnel, upperIdx, costIdx } };
+ debug: { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, monthMismatchCount, monthMismatchSamples, targetMissingColumns, targetUnrecognizedSeg, targetUnrecognizedMonth, targetUnrecognizedFunnel, upperUnrecognizedSeg, upperUnrecognizedChannel, upperMissingColumns, upperIdx, costIdx } };
 }
 
 // ===================== DEBUG PANEL (self-diagnosis, no DevTools needed) =====================
@@ -1183,8 +1184,20 @@ function renderDebugPanel(){
  const el = document.getElementById("debugPanelBody");
  if (!el) return;
  if (!LAST_DEBUG) { el.innerHTML = `<p class='note'>Belum ada data live (masih pakai fallback/cache) - debug panel hanya aktif setelah fetch live berhasil.</p>`; return; }
- const { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, monthMismatchCount, monthMismatchSamples, targetMissingColumns, targetUnrecognizedSeg, targetUnrecognizedMonth, targetUnrecognizedFunnel, upperIdx, costIdx } = LAST_DEBUG;
+ const { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, monthMismatchCount, monthMismatchSamples, targetMissingColumns, targetUnrecognizedSeg, targetUnrecognizedMonth, targetUnrecognizedFunnel, upperUnrecognizedSeg, upperUnrecognizedChannel, upperMissingColumns, upperIdx, costIdx } = LAST_DEBUG;
  let html = "";
+
+ if (upperMissingColumns && upperMissingColumns.length) {
+ html += `<div class='balert-msg bad' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[ALERT]</span><div><b>Kolom tidak ketemu di header Upper Funnel:</b> ${upperMissingColumns.join(', ')} - semua baris Upper Funnel nggak akan kehitung sampai ini diperbaiki.</div></div>`;
+ }
+ const uUnrecSegKeys = Object.keys(upperUnrecognizedSeg || {});
+ if (uUnrecSegKeys.length) {
+ html += `<div class='balert-msg warn' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[WARNING]</span><div><b>Nilai Segment 2 tidak dikenali di Upper Funnel log:</b> ${uUnrecSegKeys.map(k=>`"${k}" (${upperUnrecognizedSeg[k]} baris)`).join(', ')} - kode cuma kenal persis "New", "Repeat + Top Up", "LMT" ("Lainnya" sengaja diabaikan).</div></div>`;
+ }
+ const uUnrecChKeys = Object.keys(upperUnrecognizedChannel || {});
+ if (uUnrecChKeys.length) {
+ html += `<div class='balert-msg warn' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[WARNING]</span><div><b>Nilai Channel 1 tidak dikenali di Upper Funnel log:</b> ${uUnrecChKeys.map(k=>`"${k}" (${upperUnrecognizedChannel[k]} baris)`).join(', ')} - kode cuma kenal persis "Push Notification", "Email", "WhatsApp", "Sales AI" ("Lainnya" sengaja diabaikan).</div></div>`;
+ }
 
  if (targetMissingColumns && targetMissingColumns.length) {
  html += `<div class='balert-msg bad' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[ALERT]</span><div><b>Kolom tidak ketemu di header sheet Target:</b> ${targetMissingColumns.join(', ')} - semua baris Target nggak akan kehitung sampai ini diperbaiki.</div></div>`;
@@ -1247,14 +1260,21 @@ function renderDebugPanel(){
  });
  html += `</tbody></table>`;
 
- html += `<h4 style='font-size:12px;margin:14px 0 6px;'>Upper Funnel & Cost Detail (format pivot lama, dipetakan lewat COST_SOURCE_SEG)</h4><p class='note'>Upper Funnel: ${upperRows.length} baris CSV diterima. Cost Detail: ${costRows.length} baris CSV diterima.</p><table class='dt'><thead><tr><th>Segmen dashboard</th><th>Sumber di Upper Funnel / Cost Detail</th><th>Status</th></tr></thead><tbody>`;
+ html += `<h4 style='font-size:12px;margin:14px 0 6px;'>Upper Funnel (log harian) & Cost Detail (masih pivot lama) - dipetakan lewat COST_SOURCE_SEG</h4><p class='note'>Upper Funnel: ${upperRows.length} baris CSV diterima. Cost Detail: ${costRows.length} baris CSV diterima.</p><table class='dt'><thead><tr><th>Segmen dashboard</th><th>Sumber (Segment 2 / Cost Detail)</th><th>Status</th></tr></thead><tbody>`;
  ALL_SEGMENTS.forEach(seg => {
  const src = COST_SOURCE_SEG[seg];
- html += `<tr><td>${seg}</td><td>${src || '-'}</td><td>${src ? (upperIdx[src] ? 'ketemu di Upper Funnel' : '<span style="color:var(--bad);">header segmen tidak ketemu</span>') : '<span style="color:var(--muted);">sengaja di-exclude (tidak ada sumber)</span>'}</td></tr>`;
+ let status;
+ if (!src) status = '<span style="color:var(--muted);">sengaja di-exclude (tidak ada sumber)</span>';
+ else {
+ const segData = upperIdx[src];
+ const chCount = segData ? Object.keys(segData).length : 0;
+ status = chCount ? `ketemu, ${chCount} channel punya data` : '<span style="color:var(--bad);">tidak ada baris dengan Segment 2 ini</span>';
+ }
+ html += `<tr><td>${seg}</td><td>${src || '-'}</td><td>${status}</td></tr>`;
  });
  html += `</tbody></table>`;
  if (upperRows.length < 5) {
- html += `<div class='balert-msg bad' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-top:10px;'><span>[ALERT]</span><div><b>Sheet Upper Funnel cuma balikin ${upperRows.length} baris CSV</b> - kalau harusnya ratusan baris, ini pertanda fetch-nya gagal ambil data yang bener (kemungkinan nama tab "Upper Funnel" di sheet berubah, atau tab-nya kosong/keganti struktur). Cek nama tab persis di Google Sheets.</div></div>`;
+ html += `<div class='balert-msg bad' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-top:10px;'><span>[ALERT]</span><div><b>Sheet Upper Funnel cuma balikin ${upperRows.length} baris CSV</b> - kalau harusnya ratusan/ribuan baris, ini pertanda fetch-nya gagal ambil data yang bener (kemungkinan nama tab "Upper Funnel" di sheet berubah, atau tab-nya kosong/keganti struktur). Cek nama tab persis di Google Sheets.</div></div>`;
  }
 
  el.innerHTML = html;
@@ -2167,7 +2187,7 @@ function renderChannelEngageChart(f){
  const clickRateJun = sentJun ? clickJun/sentJun : null, clickRateJul = sentJul ? clickJul/sentJul : null;
 
  document.getElementById("channelEngageCap").textContent =
- `Bar = Sent/Delivered/Click (jumlah). Garis = Delivery Rate, Read Rate (Open/Delivered), Click Rate/CTR (Click/Sent)${chCapText(chList)}${segCapText(segList)} (data granular hanya tersedia Jun-Jul; Sales AI & segmen SL belum punya data ini di sheet)`;
+ `Bar = Sent/Delivered/Click (jumlah). Garis = Delivery Rate, Read Rate (Open/Delivered), Click Rate/CTR (Click/Sent)${chCapText(chList)}${segCapText(segList)} (Sales AI &amp; segmen SL belum punya data ini di sheet)`;
 
  if (charts.chengage) charts.chengage.destroy();
  charts.chengage = new Chart(ctx, {
