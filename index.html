@@ -670,7 +670,7 @@ function costVal(costRows, costIdx, seg, type, month){
 // Date | Segment | Geo | Channel Attribute Logic | Created Apps | After First Filter | Eligible |
 // Accepted Apps | Paid Out | Paid Out Amount | Month. If "Month" itself is missing, it's derived
 // from "Created Date" instead (which is required) - so removing just the Month column is safe.
-const RAW_SEG_TO_DASH_SEG = { "New":"New", "Repeat":"Repeat", "TopUp":"TopUp", "LMT":"LMT", "SL":"SL" };
+const RAW_SEG_TO_DASH_SEG = { "New":"New", "Repeat":"Repeat", "TopUp":"TopUp", "LMT":"LMT", "SL":"SL", "Repeat + Top Up":"Repeat" };
 const RAW_CH_TO_DASH_CH = { "WhatsApp":"WhatsApp", "Email":"Email", "Push Notification":"Push", "Sales AI":"SalesAI" };
 
 // Finds the header row (anchored on a column literally titled "No") and resolves each requested
