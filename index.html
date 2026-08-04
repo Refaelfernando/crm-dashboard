@@ -655,8 +655,22 @@ function buildUpperIndex(rows){
  return { agg, bySegDate, bySegChDate, maxDate, unrecognizedSeg, unrecognizedChannel, missingColumns: missing, totalRowsRead: rows.length - dataStart };
 }
 
+// Cost Detail's month columns are matched by header text ("Jan 2026".."Dec 2026") instead of assumed
+// to sit at a fixed "column = 2 + month" position - a hardcoded position silently reads the wrong
+// month the moment a column gets inserted/reordered in the sheet, which is exactly the class of bug
+// the other sheets (Lower/Upper Funnel, Target, Budget Monthly) were already made robust against.
+const COST_MONTH_LABELS = ["Jan 2026","Feb 2026","Mar 2026","Apr 2026","May 2026","Jun 2026","Jul 2026","Aug 2026","Sep 2026","Oct 2026","Nov 2026","Dec 2026"];
 function buildCostIndex(rows){
  const idx = {};
+ const hdrRow = rows[0] || [];
+ const monthCol = {}; // monthCol[monthNum] = 1-indexed column
+ const missingMonths = [];
+ COST_MONTH_LABELS.forEach((label, i) => {
+ const monthNum = i + 1;
+ let found = -1;
+ for (let c = 0; c < hdrRow.length; c++) { if (String(hdrRow[c]||"").trim().toLowerCase() === label.toLowerCase()) { found = c; break; } }
+ if (found >= 0) monthCol[monthNum] = found + 1; else missingMonths.push(label);
+ });
  Object.keys(COST_SEG_LABEL).forEach(segKey => {
  const segLabel = COST_SEG_LABEL[segKey];
  const find = (costLabel) => {
@@ -667,6 +681,8 @@ function buildCostIndex(rows){
  };
  idx[segKey] = { WhatsApp: find("Total Cost Whatsapp"), Email: find("Total Cost Email"), Total: find("Total Cost") };
  });
+ idx.__monthCol = monthCol;
+ idx.__missingMonths = missingMonths;
  return idx;
 }
 
@@ -681,7 +697,8 @@ function costVal(costRows, costIdx, seg, type, month){
  if (!segIdx) return null;
  const row0 = segIdx[type];
  if (row0 == null || row0 < 0) return null;
- const col = 2 + month;
+ const col = costIdx.__monthCol ? costIdx.__monthCol[month] : (2 + month); // fallback to old fixed-offset guess if header row wasn't matched at all
+ if (col == null) return null;
  return valAt(costRows, row0, col);
 }
 
@@ -1410,6 +1427,9 @@ function renderDebugPanel(){
  });
  html += `</tbody></table>`;
 
+ if (costIdx.__missingMonths && costIdx.__missingMonths.length) {
+ html += `<div class='balert-msg bad' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[ALERT]</span><div><b>Kolom bulan tidak ketemu di header Cost Detail:</b> ${costIdx.__missingMonths.join(', ')} - header row (baris 1) harus punya kolom berlabel persis format ini (contoh: "Aug 2026"). Bulan yang tidak ketemu akan selalu kosong di Cost/CPA/Budget, walau datanya sebenarnya ada di sheet.</div></div>`;
+ }
  html += `<h4 style='font-size:12px;margin:14px 0 6px;'>Upper Funnel (log harian) & Cost Detail (masih pivot lama) - dipetakan lewat COST_SOURCE_SEG</h4><p class='note'>Upper Funnel: ${upperRows.length} baris CSV diterima. Cost Detail: ${costRows.length} baris CSV diterima.</p><table class='dt'><thead><tr><th>Segmen dashboard</th><th>Sumber (Segment 2 / Cost Detail)</th><th>Status</th></tr></thead><tbody>`;
  ALL_SEGMENTS.forEach(seg => {
  const src = COST_SOURCE_SEG[seg];
@@ -2567,7 +2587,7 @@ function renderBudgetChart(f){
  const anyPlanned = planned.some(v => v != null);
  if (capEl) {
  const totalPlannedNow = planned.reduce((s,v)=>s+(v||0),0);
- capEl.textContent = anyPlanned ? `Total budget disetujui ${budgetMonthLabel}: ${rpJt(totalPlannedNow)} (dari sheet Budget Monthly)` : `Belum ada angka budget di sheet Budget Monthly untuk ${budgetMonthLabel} - pakai estimasi CPA di bawah sebagai gantinya.`;
+ capEl.textContent = (anyPlanned ? `Total budget disetujui ${budgetMonthLabel}: ${rpJt(totalPlannedNow)} (dari sheet Budget Monthly)` : `Belum ada angka budget di sheet Budget Monthly untuk ${budgetMonthLabel} - pakai estimasi CPA di bawah sebagai gantinya.`) + " Angka ini total semua channel - tidak berubah kalau filter Channel diganti, karena Budget Monthly tidak dipecah per channel.";
  }
  if (charts.budget) charts.budget.destroy();
  if (!list.length) { ctx.canvas.parentElement.innerHTML = `<div style='text-align:center;color:var(--muted);padding:16px;'>Tidak ada segmen dengan data Budget pada filter ini</div>`; document.getElementById("budgetRisk").innerHTML=""; return; }
@@ -3086,7 +3106,7 @@ function renderBudgetAlert(f){
  const titleEl = document.getElementById("budgetAlertTitle");
  if (titleEl) titleEl.textContent = ` Alert Pemakaian Budget ${MONTHS_ID[BUDGET_M-1] || `Bulan ${BUDGET_M}`}`;
  const list = costSegs(f.seg);
- document.getElementById("budgetAlertCap").textContent = list.length === ALL_SEGMENTS.filter(s=>COST_SOURCE_SEG[s]).length ? "Semua segmen (SL tidak punya data cost)" : `Segmen: ${list.join(', ') || '(tidak ada yang punya data cost)'}`;
+ document.getElementById("budgetAlertCap").textContent = (list.length === ALL_SEGMENTS.filter(s=>COST_SOURCE_SEG[s]).length ? "Semua segmen (SL tidak punya data cost)" : `Segmen: ${list.join(', ') || '(tidak ada yang punya data cost)'}`) + " - angka Budget/Cost selalu total semua channel (Budget Monthly & Cost Detail tidak dipecah per channel), jadi tidak berubah kalau filter Channel di atas diganti.";
 
  const used = list.reduce((s,seg)=> s + (AUG_COST[seg]||0), 0);
  const planned = list.reduce((s,seg)=> s + ((BUDGET_AUG[seg]&&BUDGET_AUG[seg].plannedBudget)||0), 0);
