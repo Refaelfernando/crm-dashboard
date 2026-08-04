@@ -506,9 +506,9 @@ const CHANNEL_ENGAGE_FALLBACK = {
 };
 
 const BUDGET_AUG_FALLBACK = {
- "New": { targetPO:314, budgetBase:41072456, budgetDownside:125397156 },
- "Repeat+TopUp": { targetPO:1795, budgetBase:315158920, budgetDownside:390161200 },
- "LMT": { targetPO:998, budgetBase:115574388, budgetDownside:115574388 },
+ "New": { targetPO:314, plannedBudget:null, estimateBase:41072456, estimateDownside:125397156 },
+ "Repeat+TopUp": { targetPO:1795, plannedBudget:null, estimateBase:315158920, estimateDownside:390161200 },
+ "LMT": { targetPO:998, plannedBudget:null, estimateBase:115574388, estimateDownside:115574388 },
 };
 
 // Cost Agustus aktual (kolom bulan ke-8 di Cost Detail) - 0/null selama belum ada data terisi.
@@ -601,7 +601,7 @@ function findLabelRow(rows, label, fromRow0, toRow0){
 // Rows with Segment 2="Lainnya" or Channel 1="Lainnya" are intentionally uncategorized noise (per
 // user confirmation) and are skipped without a warning; anything else unrecognized IS warned about.
 const UPPER_LOG_LABELS = { date:"Sent Date", segment:"Segment 2", channel:"Channel 1", sent:"Sent", delivered:"Delivered", read:"Read", click:"Click" };
-const UPPER_SEG_TO_SRC = { "New":"New", "Repeat + Top Up":"Repeat+TopUp", "LMT":"LMT" };
+const UPPER_SEG_TO_SRC = { "New":"New", "Repeat + Top Up":"Repeat+TopUp", "Repeat":"Repeat+TopUp", "Top Up":"Repeat+TopUp", "Top Up PDF":"Repeat+TopUp", "TopUp":"Repeat+TopUp", "LMT":"LMT" };
 const UPPER_CH_TO_DASH = { "Push Notification":"Push", "Email":"Email", "WhatsApp":"WhatsApp", "Sales AI":"SalesAI" };
 
 // Upper Funnel & Cost Detail: Cost Detail is still the old pivot format with 3 segment blocks -
@@ -970,6 +970,36 @@ function parseTargetLog(rows){
  }
  return { bySeg, missingColumns: missing, unrecognizedSeg, unrecognizedMonth, unrecognizedFunnel };
 }
+// ---- BUDGET MONTHLY: simple pivot (row 1 = header: Periode Anggaran | New | Repeat + Top Up | LMT),
+// each row below = one month's pre-set/approved budget per segment (srcSeg space, same 3 buckets as
+// Cost Detail). Anchored on "Periode Anggaran" instead of "No" since this sheet has no No column.
+const BUDGET_MONTHLY_SEG_LABEL = { "New":"New", "Repeat+TopUp":"Repeat + Top Up", "LMT":"LMT" };
+function parseBudgetMonthly(rows){
+ const headerRow = findLabelRow(rows, "Periode Anggaran", 0, rows.length);
+ const bySeg = {}; // bySeg[srcSeg][monthNum] = planned budget amount
+ const unrecognizedMonth = {};
+ if (headerRow < 0) return { bySeg, missingColumns: ["Periode Anggaran"], unrecognizedMonth };
+ const hdrRow = rows[headerRow] || [];
+ const col = {}, missing = [];
+ Object.keys(BUDGET_MONTHLY_SEG_LABEL).forEach(srcSeg => {
+ const label = BUDGET_MONTHLY_SEG_LABEL[srcSeg].toLowerCase();
+ let idx = -1;
+ for (let c = 0; c < hdrRow.length; c++) { if (String(hdrRow[c]||"").trim().toLowerCase() === label) { idx = c; break; } }
+ if (idx >= 0) col[srcSeg] = idx + 1; else { col[srcSeg] = null; missing.push(BUDGET_MONTHLY_SEG_LABEL[srcSeg]); }
+ });
+ for (let i = headerRow + 1; i < rows.length; i++) {
+ const rawMonth = cellText(rows, i, 1);
+ if (!rawMonth) continue;
+ const monthNum = TARGET_MONTH_TO_NUM[rawMonth];
+ if (!monthNum) { unrecognizedMonth[rawMonth] = (unrecognizedMonth[rawMonth]||0)+1; continue; }
+ Object.keys(col).forEach(srcSeg => {
+ if (col[srcSeg] == null) return;
+ const v = valAtCol(rows, i, col[srcSeg]);
+ if (v != null) { bySeg[srcSeg] = bySeg[srcSeg] || {}; bySeg[srcSeg][monthNum] = v; }
+ });
+ }
+ return { bySeg, missingColumns: missing, unrecognizedMonth };
+}
 function lowerLogVal(agg, seg, metric, month){
  const s = agg[seg]; if (!s || !s[month]) return null;
  const v = s[month][metric]; return v == null ? null : v;
@@ -1107,12 +1137,13 @@ function detectNumMonths(lowerAgg, targetAgg){
  return Math.min(max, 12);
 }
 
-function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
+function computeFromSheets(lowerRows, upperRows, costRows, targetRows, budgetMonthlyRows){
  const SEGS = ALL_SEGMENTS;
  const { agg: upperIdx, bySegDate: upperBySegDate, bySegChDate: upperBySegChDate, maxDate: upperMaxDate, unrecognizedSeg: upperUnrecognizedSeg, unrecognizedChannel: upperUnrecognizedChannel, missingColumns: upperMissingColumns } = buildUpperIndex(upperRows);
  const costIdx = buildCostIndex(costRows);
  const { bySeg: lowerAgg, bySegCh: lowerAggCh, bySegDate, bySegChDate, maxDate, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, monthMismatchCount, monthMismatchSamples } = parseLowerFunnelLog(lowerRows);
  const { bySeg: targetAgg, missingColumns: targetMissingColumns, unrecognizedSeg: targetUnrecognizedSeg, unrecognizedMonth: targetUnrecognizedMonth, unrecognizedFunnel: targetUnrecognizedFunnel } = parseTargetLog(targetRows);
+ const { bySeg: budgetMonthlyAgg, missingColumns: budgetMonthlyMissingColumns, unrecognizedMonth: budgetMonthlyUnrecognizedMonth } = parseBudgetMonthly(budgetMonthlyRows || []);
  const numMonths = detectNumMonths(lowerAgg, targetAgg);
  const LAST_M = numMonths, PREV_M = numMonths - 1; // "current" and "previous" month, dynamically - replaces old hardcoded Jul(7)/Jun(6)
  // ---- Which month should the Budget forecast target? ----
@@ -1193,13 +1224,18 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  const julAmt = lowerLogVal(lowerAgg, seg, "paidOutAmount", LAST_M);
  poAmountCost[seg] = (costJun != null) ? { junAmt, junCost: costJun, julAmt, julCost: costJul } : null;
 
- // ---- Budget bulan berikutnya: Target Paid Out (dari sheet Target) x CPA bulan lalu ----
+ // ---- Budget bulan berjalan: ANGKA UTAMA = pre-set/approved budget dari sheet "Budget Monthly"
+ // (real allocated plan, per srcSeg). Estimasi berbasis CPA x Target Paid Out disimpan juga sebagai
+ // pembanding ("apakah budget yang disetujui itu cukup dibanding kebutuhan aktual"), bukan lagi angka
+ // utama - dulu dipakai sebagai angka utama karena belum ada sumber budget riil.
  const targetPO = targetVal(targetAgg, seg, "paidOut", BUDGET_M);
  const cpaSeg = cpa[seg];
- budgetAug[seg] = targetPO == null ? null : {
+ const plannedBudget = srcSeg && budgetMonthlyAgg[srcSeg] ? (budgetMonthlyAgg[srcSeg][BUDGET_M] != null ? budgetMonthlyAgg[srcSeg][BUDGET_M] : null) : null;
+ budgetAug[seg] = (targetPO == null && plannedBudget == null) ? null : {
  targetPO,
- budgetBase: cpaSeg ? targetPO * cpaSeg.jun : null,
- budgetDownside: cpaSeg ? targetPO * (cpaSeg.jul != null ? cpaSeg.jul : cpaSeg.jun) : null,
+ plannedBudget,
+ estimateBase: (targetPO!=null && cpaSeg) ? targetPO * cpaSeg.jun : null,
+ estimateDownside: (targetPO!=null && cpaSeg) ? targetPO * (cpaSeg.jul != null ? cpaSeg.jul : cpaSeg.jun) : null,
  };
 
  // ---- Channel engagement Sent/Delivered/Click/Open, previous & latest month ----
@@ -1262,7 +1298,7 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  forecastSource: { bySegChDate, bySegDate, maxDate },
  forecastSourceUpper: { bySegChDate: upperBySegChDate, bySegDate: upperBySegDate, maxDate: upperMaxDate },
  targetAgg,
- debug: { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, monthMismatchCount, monthMismatchSamples, targetMissingColumns, targetUnrecognizedSeg, targetUnrecognizedMonth, targetUnrecognizedFunnel, upperUnrecognizedSeg, upperUnrecognizedChannel, upperMissingColumns, upperIdx, costIdx } };
+ debug: { lowerRows, upperRows, costRows, targetRows, budgetMonthlyRows, lowerAgg, lowerAggCh, targetAgg, budgetMonthlyAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, monthMismatchCount, monthMismatchSamples, targetMissingColumns, targetUnrecognizedSeg, targetUnrecognizedMonth, targetUnrecognizedFunnel, budgetMonthlyMissingColumns, budgetMonthlyUnrecognizedMonth, upperUnrecognizedSeg, upperUnrecognizedChannel, upperMissingColumns, upperIdx, costIdx } };
 }
 
 // ===================== DEBUG PANEL (self-diagnosis, no DevTools needed) =====================
@@ -1279,7 +1315,7 @@ function renderDebugPanel(){
  const el = document.getElementById("debugPanelBody");
  if (!el) return;
  if (!LAST_DEBUG) { el.innerHTML = `<p class='note'>Belum ada data live (masih pakai fallback/cache) - debug panel hanya aktif setelah fetch live berhasil.</p>`; return; }
- const { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, monthMismatchCount, monthMismatchSamples, targetMissingColumns, targetUnrecognizedSeg, targetUnrecognizedMonth, targetUnrecognizedFunnel, upperUnrecognizedSeg, upperUnrecognizedChannel, upperMissingColumns, upperIdx, costIdx } = LAST_DEBUG;
+ const { lowerRows, upperRows, costRows, targetRows, budgetMonthlyRows, lowerAgg, lowerAggCh, targetAgg, budgetMonthlyAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, monthMismatchCount, monthMismatchSamples, targetMissingColumns, targetUnrecognizedSeg, targetUnrecognizedMonth, targetUnrecognizedFunnel, budgetMonthlyMissingColumns, budgetMonthlyUnrecognizedMonth, upperUnrecognizedSeg, upperUnrecognizedChannel, upperMissingColumns, upperIdx, costIdx } = LAST_DEBUG;
  let html = "";
 
  if (upperMissingColumns && upperMissingColumns.length) {
@@ -1287,7 +1323,7 @@ function renderDebugPanel(){
  }
  const uUnrecSegKeys = Object.keys(upperUnrecognizedSeg || {});
  if (uUnrecSegKeys.length) {
- html += `<div class='balert-msg warn' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[WARNING]</span><div><b>Nilai Segment 2 tidak dikenali di Upper Funnel log:</b> ${uUnrecSegKeys.map(k=>`"${k}" (${upperUnrecognizedSeg[k]} baris)`).join(', ')} - kode cuma kenal persis "New", "Repeat + Top Up", "LMT" ("Lainnya" sengaja diabaikan).</div></div>`;
+ html += `<div class='balert-msg warn' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[WARNING]</span><div><b>Nilai Segment 2 tidak dikenali di Upper Funnel log:</b> ${uUnrecSegKeys.map(k=>`"${k}" (${upperUnrecognizedSeg[k]} baris)`).join(', ')} - kode kenal "New", "LMT", dan untuk Repeat+Top Up: "Repeat + Top Up", "Repeat", "Top Up", "Top Up PDF", "TopUp" (semuanya digabung jadi satu bucket "Repeat+TopUp" sesuai kesepakatan) ("Lainnya" sengaja diabaikan).</div></div>`;
  }
  const uUnrecChKeys = Object.keys(upperUnrecognizedChannel || {});
  if (uUnrecChKeys.length) {
@@ -1332,6 +1368,14 @@ function renderDebugPanel(){
  html += `<div class='balert-msg warn' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[WARNING]</span><div><b>Nilai Segment tidak dikenali di Lower Funnel log:</b> ${unrecKeys.map(k=>`"${k}" (${unrecognizedSeg[k]} baris)`).join(', ')} - baris ini di-skip, tidak ikut terhitung di manapun.</div></div>`;
  }
 
+ if (budgetMonthlyMissingColumns && budgetMonthlyMissingColumns.length) {
+ html += `<div class='balert-msg bad' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[ALERT]</span><div><b>Kolom tidak ketemu di header sheet Budget Monthly:</b> ${budgetMonthlyMissingColumns.join(', ')} - kolom itu nggak akan kehitung sampai nama header-nya dibetulin persis (harus ada baris header berisi "Periode Anggaran" di kolom A).</div></div>`;
+ }
+ const bmUnrecMonthKeys = Object.keys(budgetMonthlyUnrecognizedMonth || {});
+ if (bmUnrecMonthKeys.length) {
+ html += `<div class='balert-msg warn' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[WARNING]</span><div><b>Nilai Periode Anggaran tidak dikenali di sheet Budget Monthly:</b> ${bmUnrecMonthKeys.map(k=>`"${k}" (${budgetMonthlyUnrecognizedMonth[k]} baris)`).join(', ')} - kode cuma kenal format persis "Jan 26", "Feb 26", ..., "Dec 26".</div></div>`;
+ }
+
  html += `<h4 style='font-size:12px;margin:14px 0 6px;'>Lower Funnel (log mentah, ${lowerRows.length} baris CSV) - Total per Segmen per Bulan</h4><table class='dt'><thead><tr><th>Segmen</th><th>Bulan</th><th class='num'>Jumlah baris</th><th class='num'>Created</th><th class='num'>After FF</th><th class='num'>Eligible</th><th class='num'>Accepted</th><th class='num'>Paid Out</th><th class='num'>Paid Out Amount</th></tr></thead><tbody>`;
  ALL_SEGMENTS.forEach(seg => {
  const segData = lowerAgg[seg];
@@ -1351,6 +1395,17 @@ function renderDebugPanel(){
  [NUM_MONTHS, NUM_MONTHS+1].forEach(m => {
  const v = segData[m] ? segData[m].paidOut : null;
  html += `<tr><td>${seg}</td><td>${MONTHS_FULL[m-1] || `Bulan ${m}`}</td><td class='num'>${v!=null ? nf(v) : '<span style="color:var(--bad);">tidak ada</span>'}</td></tr>`;
+ });
+ });
+ html += `</tbody></table>`;
+
+ html += `<h4 style='font-size:12px;margin:14px 0 6px;'>Budget Monthly (${(budgetMonthlyRows||[]).length} baris CSV) - Budget Disetujui per Segmen</h4><table class='dt'><thead><tr><th>Sumber (Segment 2)</th><th>Bulan</th><th class='num'>Budget</th></tr></thead><tbody>`;
+ Object.keys(BUDGET_MONTHLY_SEG_LABEL).forEach(srcSeg => {
+ const segData = budgetMonthlyAgg[srcSeg];
+ if (!segData) { html += `<tr><td>${srcSeg}</td><td colspan='2' style='color:var(--bad);'>Tidak ada baris budget untuk sumber ini</td></tr>`; return; }
+ [NUM_MONTHS, BUDGET_M].filter((v,i,a)=>a.indexOf(v)===i).forEach(m => {
+ const v = segData[m];
+ html += `<tr><td>${srcSeg}</td><td>${MONTHS_FULL[m-1] || `Bulan ${m}`}</td><td class='num'>${v!=null ? rp(v) : '<span style="color:var(--bad);">tidak ada</span>'}</td></tr>`;
  });
  });
  html += `</tbody></table>`;
@@ -1381,10 +1436,10 @@ async function loadLiveData(){
  btn.disabled = true;
  statusEl.textContent = " Menarik data terbaru dari Google Sheet...";
  try {
- const [lowerRows, upperRows, costRows, targetRows] = await Promise.all([
- fetchSheetCSV("Lower Funnel"), fetchSheetCSV("Upper Funnel"), fetchSheetCSV("Cost Detail"), fetchSheetCSV("Target"),
+ const [lowerRows, upperRows, costRows, targetRows, budgetMonthlyRows] = await Promise.all([
+ fetchSheetCSV("Lower Funnel"), fetchSheetCSV("Upper Funnel"), fetchSheetCSV("Cost Detail"), fetchSheetCSV("Target"), fetchSheetCSV("Budget Monthly"),
  ]);
- const computed = computeFromSheets(lowerRows, upperRows, costRows, targetRows);
+ const computed = computeFromSheets(lowerRows, upperRows, costRows, targetRows, budgetMonthlyRows);
  TREND = computed.trend; COST = computed.cost; CPA = computed.cpa;
  PO_AMOUNT_COST = computed.poAmountCost; CHANNEL = computed.channel;
  CHANNEL_ENGAGE = computed.channelEngage; BUDGET_AUG = computed.budgetAug;
@@ -2503,12 +2558,16 @@ function renderBudgetChart(f){
  ? `Budget Bulan Berjalan (${budgetMonthLabel}) - Alokasi per Segmen`
  : `Budget ${budgetMonthLabel} - Alokasi per Segmen`;
  const list = costSegs(f.seg);
- const base = list.map(seg => BUDGET_AUG[seg] ? BUDGET_AUG[seg].budgetBase : null);
- const downside = list.map(seg => BUDGET_AUG[seg] ? BUDGET_AUG[seg].budgetDownside : null);
+ // planned = angka budget yang sudah disetujui/dialokasikan (sheet "Budget Monthly") - ini angka
+ // utama sekarang. estimate = kebutuhan yang DIHITUNG dari Target Paid Out x CPA terkini, dipakai
+ // sebagai pembanding buat cek apakah budget yang disetujui itu realistis dibanding kebutuhan aktual.
+ const planned = list.map(seg => BUDGET_AUG[seg] ? BUDGET_AUG[seg].plannedBudget : null);
+ const estimate = list.map(seg => BUDGET_AUG[seg] ? BUDGET_AUG[seg].estimateDownside : null);
  const capEl = document.getElementById("budgetCap");
+ const anyPlanned = planned.some(v => v != null);
  if (capEl) {
- const totalBaseNow = base.reduce((s,v)=>s+(v||0),0);
- capEl.textContent = totalBaseNow ? `Total basis: ${rpJt(totalBaseNow)} (skenario CPA level ${prevMonthLabel})` : `Total basis: belum ada data target/CPA yang cukup`;
+ const totalPlannedNow = planned.reduce((s,v)=>s+(v||0),0);
+ capEl.textContent = anyPlanned ? `Total budget disetujui ${budgetMonthLabel}: ${rpJt(totalPlannedNow)} (dari sheet Budget Monthly)` : `Belum ada angka budget di sheet Budget Monthly untuk ${budgetMonthLabel} - pakai estimasi CPA di bawah sebagai gantinya.`;
  }
  if (charts.budget) charts.budget.destroy();
  if (!list.length) { ctx.canvas.parentElement.innerHTML = `<div style='text-align:center;color:var(--muted);padding:16px;'>Tidak ada segmen dengan data Budget pada filter ini</div>`; document.getElementById("budgetRisk").innerHTML=""; return; }
@@ -2517,8 +2576,8 @@ function renderBudgetChart(f){
  data: {
  labels: list,
  datasets: [
- { label: `Basis ${prevMonthLabel} (dipakai)`, data: base, backgroundColor: BLUE + "CC", borderRadius: 4 },
- { label: `Skenario ${lastMonthLabel} (risiko)`, data: downside, backgroundColor: BAD + "99", borderRadius: 4 },
+ { label: `Budget Disetujui ${budgetMonthLabel}`, data: planned, backgroundColor: BLUE + "CC", borderRadius: 4 },
+ { label: `Estimasi Kebutuhan (CPA ${lastMonthLabel})`, data: estimate, backgroundColor: BAD + "99", borderRadius: 4 },
  ]
  },
  options: {
@@ -2531,28 +2590,36 @@ function renderBudgetChart(f){
  }
  });
 
- const totalBase = list.reduce((s,seg)=>s+((BUDGET_AUG[seg]&&BUDGET_AUG[seg].budgetBase)||0),0);
- const totalDownside = list.reduce((s,seg)=>s+((BUDGET_AUG[seg]&&BUDGET_AUG[seg].budgetDownside)||0),0);
+ const totalPlanned = list.reduce((s,seg)=>s+((BUDGET_AUG[seg]&&BUDGET_AUG[seg].plannedBudget)||0),0);
+ const totalEstimate = list.reduce((s,seg)=>s+((BUDGET_AUG[seg]&&BUDGET_AUG[seg].estimateDownside)||0),0);
  const riskEl = document.getElementById("budgetRisk");
- if (totalDownside > 500000000) {
- riskEl.innerHTML = `<b>Risiko:</b> kalau tren CPC ${lastMonthLabel} berlanjut, budget riil bisa naik ke ${rpJt(totalDownside)} - lewat cap Rp500jt sebesar ${rpJt(totalDownside-500000000)}.`;
+ if (!anyPlanned) {
+ riskEl.innerHTML = `<b>Info:</b> sheet Budget Monthly belum punya angka untuk ${budgetMonthLabel} - tidak bisa dibandingkan dulu.`;
+ } else if (totalEstimate > totalPlanned) {
+ riskEl.innerHTML = `<b>Risiko:</b> estimasi kebutuhan berbasis CPA ${lastMonthLabel} (${rpJt(totalEstimate)}) melebihi budget yang sudah disetujui (${rpJt(totalPlanned)}) - kurang ${rpJt(totalEstimate-totalPlanned)}.`;
  } else {
- riskEl.innerHTML = `<b>Aman:</b> skenario downside (${rpJt(totalDownside)}) masih di bawah cap Rp500jt.`;
+ riskEl.innerHTML = `<b>Aman:</b> budget yang disetujui (${rpJt(totalPlanned)}) masih di atas estimasi kebutuhan CPA ${lastMonthLabel} (${rpJt(totalEstimate)}).`;
  }
 
  const firEl = document.getElementById("budgetFIR");
  if (firEl) {
- const variancePct = totalBase ? (totalDownside-totalBase)/totalBase : 0;
- const findings = `Basis budget (pakai CPA ${prevMonthLabel}) = ${rpJt(totalBase)}. Skenario downside (pakai CPA ${lastMonthLabel}) = ${rpJt(totalDownside)} (${variancePct>=0?'+':''}${pct(variancePct,1)}).`;
+ if (!anyPlanned) {
+ firEl.innerHTML = firHtml(`Belum ada angka budget ${budgetMonthLabel} di sheet Budget Monthly untuk segmen terpilih.`, "-", "Action: isi dulu sheet Budget Monthly untuk bulan ini supaya bisa dibandingkan dengan estimasi kebutuhan.");
+ } else {
+ const variancePct = totalPlanned ? (totalEstimate-totalPlanned)/totalPlanned : 0;
+ const findings = `Budget disetujui ${budgetMonthLabel} (sheet Budget Monthly) = ${rpJt(totalPlanned)}. Estimasi kebutuhan (Target Paid Out x CPA ${lastMonthLabel}) = ${rpJt(totalEstimate)} (${variancePct>=0?'+':''}${pct(variancePct,1)} vs budget disetujui).`;
  const absV = Math.abs(variancePct);
  const tier = absV > 0.3 ? "strong" : (absV > 0.15 ? "watch" : "stable");
  const insight = tier === "strong"
- ? `Selisih antar-skenario besar (>30%) - angka budget ini sensitif banget terhadap asumsi CPA yang dipakai, bukan angka yang solid.`
- : (tier === "watch" ? `Selisih antar-skenario di zona waspada (15-30%) - lumayan sensitif terhadap asumsi CPA.` : `Selisih antar-skenario kecil (<15%) - basis budget ini cukup stabil terhadap perubahan CPA bulan ke bulan.`);
+ ? `Selisih budget disetujui vs estimasi kebutuhan besar (>30%) - ${variancePct>0 ? 'budget yang disetujui kemungkinan tidak cukup' : 'budget yang disetujui jauh di atas kebutuhan riil'} kalau CPA ${lastMonthLabel} berlanjut.`
+ : (tier === "watch" ? `Selisih di zona waspada (15-30%) - masih dalam toleransi tapi worth dipantau.` : `Selisih kecil (<15%) - budget yang disetujui cukup align dengan estimasi kebutuhan berbasis CPA terkini.`);
  const recommendation = tier === "strong"
- ? `Action: JANGAN komit ke satu angka budget doang - ajukan dengan buffer ${pct(absV,0)} atau minta approval bertahap (cair sebagian dulu), dan pantau CPA aktual di 1-2 minggu pertama Agustus buat re-kalibrasi cepat.`
- : (tier === "watch" ? `Action: ajukan basis budget ini tapi siapkan buffer kecil (~10-15%) buat jaga-jaga, review lagi pertengahan Agustus.` : `Action: budget basis ini aman dipakai langsung sebagai acuan pengajuan, risiko meleset jauh relatif kecil.`);
+ ? (variancePct > 0
+ ? `Action: ajukan penambahan budget atau siapkan skenario penurunan target Paid Out - kalau CPA ${lastMonthLabel} berlanjut, budget yang ada bisa habis sebelum target tercapai. Pantau CPA aktual minggu-minggu awal buat re-kalibrasi cepat.`
+ : `Action: budget yang disetujui berlebih dibanding kebutuhan CPA saat ini - pertimbangkan realokasi sebagian ke segmen lain yang lebih butuh, atau simpan sebagai buffer.`)
+ : (tier === "watch" ? `Action: budget disetujui masih masuk akal, tapi pantau CPA aktual pertengahan bulan buat memastikan tidak melenceng jauh.` : `Action: budget disetujui sudah align dengan kebutuhan, tidak perlu penyesuaian.`);
  firEl.innerHTML = firHtml(findings, insight, recommendation);
+ }
  }
 }
 
@@ -3022,12 +3089,15 @@ function renderBudgetAlert(f){
  document.getElementById("budgetAlertCap").textContent = list.length === ALL_SEGMENTS.filter(s=>COST_SOURCE_SEG[s]).length ? "Semua segmen (SL tidak punya data cost)" : `Segmen: ${list.join(', ') || '(tidak ada yang punya data cost)'}`;
 
  const used = list.reduce((s,seg)=> s + (AUG_COST[seg]||0), 0);
- const planned = list.reduce((s,seg)=> s + ((BUDGET_AUG[seg]&&BUDGET_AUG[seg].budgetBase)||0), 0);
+ const planned = list.reduce((s,seg)=> s + ((BUDGET_AUG[seg]&&BUDGET_AUG[seg].plannedBudget)||0), 0);
  const pct = planned ? (used/planned*100) : 0;
  const capped = Math.min(pct, 100);
 
  let barColor = GOOD, msgClass = "ok", icon = "[OK]", title = "Aman", desc = `Pemakaian budget masih di bawah 25%.`;
- if (used === 0) {
+ if (!planned) {
+ barColor = MUTED; msgClass = "info"; icon = "[INFO]"; title = "Belum ada angka budget";
+ desc = "Sheet Budget Monthly belum punya angka untuk bulan ini pada segmen terpilih, jadi persentase pemakaian belum bisa dihitung.";
+ } else if (used === 0) {
  barColor = MUTED; msgClass = "info"; icon = "[INFO]"; title = "Belum ada data";
  desc = "Belum ada cost Agustus tercatat di sheet. Alert ini otomatis aktif begitu data Agustus mulai masuk.";
  } else if (pct >= 100) {
@@ -3057,7 +3127,7 @@ function renderBudgetAlert(f){
  <div class='balert-msg ${msgClass}'><span>${icon}</span><div><b>${title}</b><br>${desc}</div></div>
  <div class='balert-stats'>
  <div>Terpakai<b>${rpJt(used)}</b></div>
- <div>Alokasi (basis ${MONTHS[NUM_MONTHS-2] || MONTHS[0]})<b>${rpJt(planned)}</b></div>
+ <div>Alokasi (Budget Monthly)<b>${rpJt(planned)}</b></div>
  <div>Sisa<b>${rpJt(Math.max(planned-used,0))}</b></div>
  <div>% Terpakai<b>${pct.toFixed(1).replace('.',',')}%</b></div>
  </div>
