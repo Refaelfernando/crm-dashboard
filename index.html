@@ -554,6 +554,7 @@ let TREND = TREND_FALLBACK, COST = COST_FALLBACK, CPA = CPA_FALLBACK,
  CHANNEL_DETAIL = CHANNEL_DETAIL_FALLBACK, COST_BY_CHANNEL = COST_BY_CHANNEL_FALLBACK,
  AUG_COST = AUG_COST_FALLBACK, WA_STATS = WA_STATS_FALLBACK;
 let FORECAST_SOURCE = null; // only populated after a successful live fetch - needs real daily dates, which the offline fallback snapshot doesn't have
+let FORECAST_SOURCE_UPPER = null; // same idea, day-level Sent/Delivered/Click/Open from Upper Funnel (srcSeg keyspace: New/Repeat+TopUp/LMT)
 let TARGET_AGG = null; // Target sheet, aggregated per segment/month/metric - only populated after a successful live fetch
 
 // ===================== LIVE DATA LOADER (Google Sheet) =====================
@@ -610,6 +611,11 @@ const COST_SEG_LABEL = { "New": "New", "Repeat+TopUp": "Repeat + Top Up", "LMT":
 function buildUpperIndex(rows){
  const { dataStart, col, missing } = resolveColumnsByHeader(rows, UPPER_LOG_LABELS);
  const agg = {}; // agg[srcSeg][ch][month] = {sent, delivered, click, open}
+ // Day-level mirrors of the same data (srcSeg keyspace: New / Repeat+TopUp / LMT), used to forecast
+ // Sent/Delivered/Click/Open to month-end when the latest month is still in progress - same idea as
+ // Lower Funnel's bySegDate/bySegChDate, just built from Upper Funnel's own "Sent Date" column.
+ const bySegDate = {}, bySegChDate = {};
+ let maxDate = null;
  const unrecognizedSeg = {}, unrecognizedChannel = {};
  for (let i = dataStart; i < rows.length; i++) {
  const rawSeg = cellAtCol(rows, i, col.segment);
@@ -634,8 +640,19 @@ function buildUpperIndex(rows){
  agg[srcSeg][ch] = agg[srcSeg][ch] || {};
  agg[srcSeg][ch][month] = agg[srcSeg][ch][month] || { sent:0, delivered:0, click:0, open:0 };
  Object.keys(v).forEach(k => agg[srcSeg][ch][month][k] += v[k]);
+
+ const dateStr = `${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}`;
+ bySegDate[srcSeg] = bySegDate[srcSeg] || {};
+ bySegDate[srcSeg][dateStr] = bySegDate[srcSeg][dateStr] || { sent:0, delivered:0, click:0, open:0 };
+ Object.keys(v).forEach(k => bySegDate[srcSeg][dateStr][k] += v[k]);
+
+ bySegChDate[srcSeg] = bySegChDate[srcSeg] || {};
+ bySegChDate[srcSeg][ch] = bySegChDate[srcSeg][ch] || {};
+ bySegChDate[srcSeg][ch][dateStr] = bySegChDate[srcSeg][ch][dateStr] || { sent:0, delivered:0, click:0, open:0 };
+ Object.keys(v).forEach(k => bySegChDate[srcSeg][ch][dateStr][k] += v[k]);
+ if (!maxDate || dateStr > maxDate) maxDate = dateStr;
  }
- return { agg, unrecognizedSeg, unrecognizedChannel, missingColumns: missing, totalRowsRead: rows.length - dataStart };
+ return { agg, bySegDate, bySegChDate, maxDate, unrecognizedSeg, unrecognizedChannel, missingColumns: missing, totalRowsRead: rows.length - dataStart };
 }
 
 function buildCostIndex(rows){
@@ -849,6 +866,18 @@ function maxDateForFilter(bySegDate, bySegChDate, segArr, chArr){
  }));
  }
  return max;
+}
+// Single-metric version of computeForecast(), for FIR sections that need to forecast just one
+// number (e.g. Created for one segment) to month-end before comparing it against a prior full month.
+// Returns null when there's no daily source to forecast from (metric/segment not tracked daily, or
+// no live data loaded yet) - callers must fall back to the raw actual in that case, not fabricate one.
+function forecastMonthEndFor(bySegDate, bySegChDate, maxDate, segArr, chArr, metric){
+ if (!maxDate || !segArr || !segArr.length) return null;
+ const [y, m, d] = maxDate.split('-').map(Number);
+ const total = daysInMonth(y, m);
+ const series = buildDailySeries(bySegDate, bySegChDate, segArr, chArr, y, m, d, metric);
+ const mtdActual = series.reduce((s,p)=>s+p.value,0);
+ return { mtdActual, forecast: linearForecastMonthEnd(series, total), asOfDay: d, daysInMonth: total, year: y, month: m };
 }
 function computeForecast(bySegDate, bySegChDate, maxDate, segArr, chArr){
  if (!maxDate) return null;
@@ -1080,7 +1109,7 @@ function detectNumMonths(lowerAgg, targetAgg){
 
 function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  const SEGS = ALL_SEGMENTS;
- const { agg: upperIdx, unrecognizedSeg: upperUnrecognizedSeg, unrecognizedChannel: upperUnrecognizedChannel, missingColumns: upperMissingColumns } = buildUpperIndex(upperRows);
+ const { agg: upperIdx, bySegDate: upperBySegDate, bySegChDate: upperBySegChDate, maxDate: upperMaxDate, unrecognizedSeg: upperUnrecognizedSeg, unrecognizedChannel: upperUnrecognizedChannel, missingColumns: upperMissingColumns } = buildUpperIndex(upperRows);
  const costIdx = buildCostIndex(costRows);
  const { bySeg: lowerAgg, bySegCh: lowerAggCh, bySegDate, bySegChDate, maxDate, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, monthMismatchCount, monthMismatchSamples } = parseLowerFunnelLog(lowerRows);
  const { bySeg: targetAgg, missingColumns: targetMissingColumns, unrecognizedSeg: targetUnrecognizedSeg, unrecognizedMonth: targetUnrecognizedMonth, unrecognizedFunnel: targetUnrecognizedFunnel } = parseTargetLog(targetRows);
@@ -1231,6 +1260,7 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows){
  return { trend, cost, cpa, poAmountCost, channel, channelEngage, budgetAug, channelDetail, costByChannel, augCost, waStats,
  numMonths, budgetM: BUDGET_M, budgetMIsCurrent: isLastMonthInProgress,
  forecastSource: { bySegChDate, bySegDate, maxDate },
+ forecastSourceUpper: { bySegChDate: upperBySegChDate, bySegDate: upperBySegDate, maxDate: upperMaxDate },
  targetAgg,
  debug: { lowerRows, upperRows, costRows, targetRows, lowerAgg, lowerAggCh, targetAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, monthMismatchCount, monthMismatchSamples, targetMissingColumns, targetUnrecognizedSeg, targetUnrecognizedMonth, targetUnrecognizedFunnel, upperUnrecognizedSeg, upperUnrecognizedChannel, upperMissingColumns, upperIdx, costIdx } };
 }
@@ -1361,6 +1391,7 @@ async function loadLiveData(){
  CHANNEL_DETAIL = computed.channelDetail; COST_BY_CHANNEL = computed.costByChannel;
  AUG_COST = computed.augCost; WA_STATS = computed.waStats;
  FORECAST_SOURCE = computed.forecastSource;
+ FORECAST_SOURCE_UPPER = computed.forecastSourceUpper;
  TARGET_AGG = computed.targetAgg;
  NUM_MONTHS = computed.numMonths;
  BUDGET_M = computed.budgetM;
@@ -1384,6 +1415,7 @@ async function loadLiveData(){
  CHANNEL_DETAIL = CHANNEL_DETAIL_FALLBACK; COST_BY_CHANNEL = COST_BY_CHANNEL_FALLBACK;
  AUG_COST = AUG_COST_FALLBACK; WA_STATS = WA_STATS_FALLBACK;
  FORECAST_SOURCE = null;
+ FORECAST_SOURCE_UPPER = null;
  TARGET_AGG = null;
  LAST_DEBUG = null;
  renderDebugPanel();
@@ -2023,12 +2055,29 @@ function renderKPIFIR(f){
 
  if (curM === 0) { el.innerHTML = firHtml("Bulan awal periode - belum ada bulan pembanding.","-","-"); return; }
 
+ // Only the month currently in progress (curM === NUM_MONTHS-1 AND that latest month isn't finished
+ // yet) needs forecasting to month-end before comparison - any earlier month picked from the dropdown
+ // is already a complete month, so it's compared as-is.
+ const curMIsPartial = BUDGET_M_IS_CURRENT && (curM === NUM_MONTHS - 1);
+ const DAILY_METRIC_KEY = { created:"created", paidOut:"paidOut", paidOutAmount:"paidOutAmount" };
+
  const segAnalyses = list.map(seg => {
  const metrics = SEGMENT_FOCUS_METRICS[seg] || ["created","paidOut","paidOutAmount"];
  const metricResults = metrics.map(metric => {
  const arr = metricArr(seg, metric);
  if (!arr || arr[curM] == null) return null;
- const cur = arr[curM], prev = arr[curM-1];
+ let cur = arr[curM];
+ const prev = arr[curM-1];
+ let isForecast = false, mtdActual = null, asOfDay = null, daysInM = null, noDailySource = false;
+ if (curMIsPartial) {
+ const dailyKey = DAILY_METRIC_KEY[metric];
+ if (dailyKey && FORECAST_SOURCE && FORECAST_SOURCE.maxDate) {
+ const fc = forecastMonthEndFor(FORECAST_SOURCE.bySegDate, FORECAST_SOURCE.bySegChDate, FORECAST_SOURCE.maxDate, [seg], f.ch, dailyKey);
+ if (fc) { cur = fc.forecast; mtdActual = fc.mtdActual; asOfDay = fc.asOfDay; daysInM = fc.daysInMonth; isForecast = true; }
+ } else {
+ noDailySource = true;
+ }
+ }
  let change = null, z = null;
  if (prev) {
  change = (cur-prev)/prev;
@@ -2038,7 +2087,7 @@ function renderKPIFIR(f){
  }
  const targetM = getTarget(seg, metric, curM+1);
  const achievement = (targetM && cur!=null) ? cur/targetM : null;
- return { metric, cur, prev, change, z, targetM, achievement };
+ return { metric, cur, prev, change, z, targetM, achievement, isForecast, mtdActual, asOfDay, daysInM, noDailySource };
  }).filter(Boolean);
  return { seg, metricResults };
  }).filter(sa => sa.metricResults.length);
@@ -2046,9 +2095,10 @@ function renderKPIFIR(f){
  if (!segAnalyses.length) { el.innerHTML = firHtml("Tidak ada data yang cukup untuk dianalisis pada kombinasi filter ini.","-","-"); return; }
 
  const fmtVal = (metric, v) => METRIC_IS_CURRENCY[metric] ? rp(v) : nf(v);
- const findings = segAnalyses.map(sa => `${sa.seg}: ` + sa.metricResults.map(m =>
- `${METRIC_LABEL[m.metric]} ${fmtVal(m.metric, m.cur)}${m.change!=null?` (${m.change>=0?'+':''}${pct(m.change,1)} vs ${MONTHS[curM-1]})`:''}${m.targetM!=null?`, ${pct(m.achievement,0)} dari target ${fmtVal(m.metric, m.targetM)}`:''}`
- ).join(', ')
+ const findings = segAnalyses.map(sa => `${sa.seg}: ` + sa.metricResults.map(m => {
+ const label = m.isForecast ? ' (proyeksi akhir bulan' + (m.mtdActual!=null?`, aktual s.d. tgl ${m.asOfDay}/${m.daysInM}: ${fmtVal(m.metric,m.mtdActual)}`:'') + ')' : (m.noDailySource ? ' (data parsial, bulan belum tutup)' : '');
+ return `${METRIC_LABEL[m.metric]} ${fmtVal(m.metric, m.cur)}${label}${m.change!=null?` (${m.change>=0?'+':''}${pct(m.change,1)} vs ${MONTHS[curM-1]})`:''}${m.targetM!=null?`, ${pct(m.achievement,0)} dari target ${fmtVal(m.metric, m.targetM)}`:''}`;
+ }).join(', ')
  ).join('. ') + '.';
 
  const insight = segAnalyses.map(sa => {
@@ -2056,6 +2106,7 @@ function renderKPIFIR(f){
  const bits = [];
  if (m.z != null) bits.push(`vs bulan lalu ${zVerdict(m.z).text} (z=${m.z.toFixed(2)})`);
  if (m.achievement != null) bits.push(`vs target ${achievementVerdict(m.achievement).text} (${pct(m.achievement,0)})`);
+ if (m.isForecast) bits.push('berdasar proyeksi akhir bulan');
  return bits.length ? `${METRIC_LABEL[m.metric]}: ${bits.join(', ')}` : null;
  }).filter(Boolean);
  return parts.length ? `${sa.seg} - ${parts.join('; ')}.` : null;
@@ -2070,21 +2121,22 @@ function renderKPIFIR(f){
  : sa.metricResults.filter(m => m.z != null).sort((a,b) => Math.abs(b.z) - Math.abs(a.z))[0];
  if (!driver) return null;
  const mLabel = METRIC_LABEL[driver.metric];
+ const fcNote = driver.isForecast ? ' (proyeksi akhir bulan)' : '';
  if (driver.achievement != null) {
  const av = achievementVerdict(driver.achievement);
- if (av.level === "bad") return `${sa.seg}: ${mLabel} cuma ${pct(driver.achievement,0)} dari target - Action: butuh percepatan segera, naikkan volume kirim/budget ${mLabel === "Paid Out Amount" ? "atau tingkatkan nilai transaksi per lead" : ""} dan cek tahap funnel mana yang paling nge-bottleneck target ini.`;
- if (av.level === "warn") return `${sa.seg}: ${mLabel} baru ${pct(driver.achievement,0)} dari target - Action: masih bisa dikejar sisa bulan ini, tapi mulai naikkan pace sekarang (+10-15%), jangan tunggu akhir bulan.`;
- if (av.level === "info") return `${sa.seg}: ${mLabel} udah ${pct(driver.achievement,0)} dari target - Action: pertahankan pace saat ini, tinggal sedikit lagi buat capai target.`;
- return `${sa.seg}: ${mLabel} udah capai target (${pct(driver.achievement,0)}) - Action: pertahankan strategi saat ini, pertimbangkan naikkan target bulan depan kalau konsisten.`;
+ if (av.level === "bad") return `${sa.seg}: ${mLabel} cuma ${pct(driver.achievement,0)} dari target${fcNote} - Action: butuh percepatan segera, naikkan volume kirim/budget ${mLabel === "Paid Out Amount" ? "atau tingkatkan nilai transaksi per lead" : ""} dan cek tahap funnel mana yang paling nge-bottleneck target ini.`;
+ if (av.level === "warn") return `${sa.seg}: ${mLabel} baru ${pct(driver.achievement,0)} dari target${fcNote} - Action: masih bisa dikejar sisa bulan ini, tapi mulai naikkan pace sekarang (+10-15%), jangan tunggu akhir bulan.`;
+ if (av.level === "info") return `${sa.seg}: ${mLabel} udah ${pct(driver.achievement,0)} dari target${fcNote} - Action: pertahankan pace saat ini, tinggal sedikit lagi buat capai target.`;
+ return `${sa.seg}: ${mLabel} udah capai target (${pct(driver.achievement,0)})${fcNote} - Action: pertahankan strategi saat ini, pertimbangkan naikkan target bulan depan kalau konsisten.`;
  }
  const tier = zTier(driver.z);
  if (tier === "strong" || tier === "significant") return driver.z > 0
- ? `${sa.seg}: ${mLabel} naik di luar kebiasaan - Action: manfaatkan momentum, naikkan budget 10-20%.`
- : `${sa.seg}: ${mLabel} turun di luar kebiasaan - Action: tahan budget, audit channel/funnel segmen ini.`;
+ ? `${sa.seg}: ${mLabel} naik di luar kebiasaan${fcNote} - Action: manfaatkan momentum, naikkan budget 10-20%.`
+ : `${sa.seg}: ${mLabel} turun di luar kebiasaan${fcNote} - Action: tahan budget, audit channel/funnel segmen ini.`;
  if (tier === "watch") return driver.z > 0
- ? `${sa.seg}: ${mLabel} mulai naik (belum signifikan) - Action: uji kecil dulu sebelum komit besar.`
- : `${sa.seg}: ${mLabel} mulai turun (belum signifikan) - Action: investigasi dini.`;
- return `${sa.seg}: ${mLabel} stabil - Action: pertahankan strategi saat ini.`;
+ ? `${sa.seg}: ${mLabel} mulai naik (belum signifikan)${fcNote} - Action: uji kecil dulu sebelum komit besar.`
+ : `${sa.seg}: ${mLabel} mulai turun (belum signifikan)${fcNote} - Action: investigasi dini.`;
+ return `${sa.seg}: ${mLabel} stabil${fcNote} - Action: pertahankan strategi saat ini.`;
  }).filter(Boolean);
 
  el.innerHTML = firHtml(findings, insight, recParts.join(' '));
@@ -2094,7 +2146,8 @@ function renderKPIFIR(f){
 function renderTrendChart(f){
  const ctx = document.getElementById("trendChart").getContext("2d");
  const titleEl = document.getElementById("trendTitle");
- if (titleEl) titleEl.textContent = `Trend Created & Paid Out - ${MONTHS[0]} s.d. ${MONTHS[MONTHS.length-1]}`;
+ if (titleEl) titleEl.textContent = `Trend Created & Paid Out - ${MONTHS[0]} s.d. ${MONTHS[MONTHS.length-1]}` +
+ (BUDGET_M_IS_CURRENT ? ` (${MONTHS[MONTHS.length-1]}: proyeksi akhir bulan, bulan masih berjalan)` : '');
  const list = segs(f.seg);
  const datasets = [];
  list.forEach(seg => {
@@ -2129,19 +2182,38 @@ function renderTrendChart(f){
  if (metric === "paidOutAmount") return TREND[seg].paidOutAmount;
  return TREND[seg].created;
  }
+ // Maps a Trend metric key to the daily-log metric key used by FORECAST_SOURCE (bySegDate/bySegChDate) -
+ // only created/paidOut/paidOutAmount are tracked at daily granularity; eligible has no daily source.
+ const DAILY_METRIC_KEY = { created:"created", paidOut:"paidOut", paidOutAmount:"paidOutAmount" };
  const segAnalyses = list.map(seg => {
  const metrics = SEGMENT_FOCUS_METRICS[seg] || ["created","paidOut","paidOutAmount"];
  const lastIdx = NUM_MONTHS - 1, prevIdx = NUM_MONTHS - 2; // 0-indexed arrays
  const metricResults = metrics.map(metric => {
  const arr = trendMetricArr(seg, metric);
  if (!arr || arr[lastIdx] == null || !arr[prevIdx]) return null;
- const cur = arr[lastIdx], prev = arr[prevIdx];
+ let cur = arr[lastIdx];
+ const prev = arr[prevIdx];
+ // When the latest month is still in progress, comparing its partial actual straight against a
+ // full previous month makes every metric look like it's collapsing (partial vs. full is not
+ // apples-to-apples). Forecast the latest month to its own month-end first (linear regression on
+ // daily cumulative data), and compare/act on THAT instead - keeping the raw MTD actual around
+ // just for transparency in the findings text.
+ let isForecast = false, mtdActual = null, asOfDay = null, daysInM = null, noDailySource = false;
+ if (BUDGET_M_IS_CURRENT) {
+ const dailyKey = DAILY_METRIC_KEY[metric];
+ if (dailyKey && FORECAST_SOURCE && FORECAST_SOURCE.maxDate) {
+ const fc = forecastMonthEndFor(FORECAST_SOURCE.bySegDate, FORECAST_SOURCE.bySegChDate, FORECAST_SOURCE.maxDate, [seg], f.ch, dailyKey);
+ if (fc) { cur = fc.forecast; mtdActual = fc.mtdActual; asOfDay = fc.asOfDay; daysInM = fc.daysInMonth; isForecast = true; }
+ } else {
+ noDailySource = true; // e.g. "eligible" - no daily log to forecast from, flag as partial instead
+ }
+ }
  const change = (cur-prev)/prev;
  const changes = []; for (let i=1;i<=prevIdx;i++){ if(arr[i]!=null && arr[i-1]) changes.push((arr[i]-arr[i-1])/arr[i-1]); }
  const zObj = zScoreVsHistory(change, changes);
  const targetM = getTarget(seg, metric, NUM_MONTHS);
  const achievement = (targetM && cur!=null) ? cur/targetM : null;
- return { metric, cur, prev, change, z: zObj?zObj.z:null, targetM, achievement };
+ return { metric, cur, prev, change, z: zObj?zObj.z:null, targetM, achievement, isForecast, mtdActual, asOfDay, daysInM, noDailySource };
  }).filter(Boolean);
  return { seg, metricResults };
  }).filter(sa => sa.metricResults.length);
@@ -2149,13 +2221,16 @@ function renderTrendChart(f){
 
  const fmtVal = (metric, v) => METRIC_IS_CURRENCY[metric] ? rp(v) : nf(v);
  const lastML = MONTHS[NUM_MONTHS-1], prevML = MONTHS[NUM_MONTHS-2] || MONTHS[0];
- const findings = segAnalyses.map(sa => `${sa.seg}: ` + sa.metricResults.map(m =>
- `${METRIC_LABEL[m.metric]} ${lastML} ${fmtVal(m.metric, m.cur)} (${m.change>=0?'+':''}${pct(m.change,1)} vs ${prevML}${m.targetM!=null?`, ${pct(m.achievement,0)} dari target`:''})`
- ).join(', ')
- ).join('. ') + '.';
+ const findings = segAnalyses.map(sa => `${sa.seg}: ` + sa.metricResults.map(m => {
+ const label = m.isForecast ? `proyeksi ${lastML}` : (m.noDailySource ? `${lastML} (parsial)` : lastML);
+ const mtdNote = m.isForecast ? ` [aktual s.d. tgl ${m.asOfDay}/${m.daysInM}: ${fmtVal(m.metric, m.mtdActual)}]` : '';
+ return `${METRIC_LABEL[m.metric]} ${label} ${fmtVal(m.metric, m.cur)}${mtdNote} (${m.change>=0?'+':''}${pct(m.change,1)} vs ${prevML}${m.targetM!=null?`, ${pct(m.achievement,0)} dari target`:''})`;
+ }).join(', ')
+ ).join('. ') + '.' + (segAnalyses.some(sa=>sa.metricResults.some(m=>m.noDailySource))
+ ? ` (Catatan: metrik yang ditandai "parsial" belum punya data harian untuk di-forecast, jadi angka ${lastML}-nya masih data s.d. hari ini, bukan estimasi akhir bulan.)` : '');
 
  const insight = segAnalyses.map(sa => sa.metricResults.map(m =>
- `${sa.seg}/${METRIC_LABEL[m.metric]}: z=${m.z!=null?m.z.toFixed(2):'-'} (${m.z!=null?zVerdict(m.z).text:'belum cukup histori'})${m.achievement!=null?`, ${achievementVerdict(m.achievement).text}`:''}`
+ `${sa.seg}/${METRIC_LABEL[m.metric]}: z=${m.z!=null?m.z.toFixed(2):'-'} (${m.z!=null?zVerdict(m.z).text:'belum cukup histori'})${m.achievement!=null?`, ${achievementVerdict(m.achievement).text}`:''}${m.isForecast?' [berdasar proyeksi akhir bulan]':''}`
  ).join('; ')).join(' ');
 
  const recParts = segAnalyses.map(sa => {
@@ -2164,21 +2239,22 @@ function renderTrendChart(f){
  : sa.metricResults.filter(m=>m.z!=null).sort((a,b)=>Math.abs(b.z)-Math.abs(a.z))[0];
  if (!driver) return null;
  const mLabel = METRIC_LABEL[driver.metric];
+ const fcNote = driver.isForecast ? ' (berdasar proyeksi akhir bulan, bukan angka parsial)' : '';
  if (driver.achievement != null) {
  const av = achievementVerdict(driver.achievement);
- if (av.level === "bad") return `${sa.seg}: ${mLabel} cuma ${pct(driver.achievement,0)} dari target ${lastML} - Action: percepat sekarang, naikkan budget/volume kirim dan cek tahap funnel yang macet.`;
- if (av.level === "warn") return `${sa.seg}: ${mLabel} ${pct(driver.achievement,0)} dari target - Action: masih bisa dikejar, naikkan pace +10-15%.`;
- if (av.level === "info") return `${sa.seg}: ${mLabel} ${pct(driver.achievement,0)} dari target - Action: pertahankan pace, hampir sampai.`;
- return `${sa.seg}: ${mLabel} sudah capai target (${pct(driver.achievement,0)}) - Action: pertahankan, pertimbangkan naikkan target berikutnya.`;
+ if (av.level === "bad") return `${sa.seg}: ${mLabel} cuma ${pct(driver.achievement,0)} dari target ${lastML}${fcNote} - Action: percepat sekarang, naikkan budget/volume kirim dan cek tahap funnel yang macet.`;
+ if (av.level === "warn") return `${sa.seg}: ${mLabel} ${pct(driver.achievement,0)} dari target${fcNote} - Action: masih bisa dikejar, naikkan pace +10-15%.`;
+ if (av.level === "info") return `${sa.seg}: ${mLabel} ${pct(driver.achievement,0)} dari target${fcNote} - Action: pertahankan pace, hampir sampai.`;
+ return `${sa.seg}: ${mLabel} sudah capai target (${pct(driver.achievement,0)})${fcNote} - Action: pertahankan, pertimbangkan naikkan target berikutnya.`;
  }
  const tier = zTier(driver.z);
  if (tier === "strong" || tier === "significant") return driver.z > 0
- ? `${sa.seg}: ${mLabel} naik di luar kebiasaan - Action: naikkan budget 10-20% selagi momentum masih ada.`
- : `${sa.seg}: ${mLabel} turun di luar kebiasaan - Action: tahan budget, audit channel &amp; tahap funnel yang macet.`;
+ ? `${sa.seg}: ${mLabel} naik di luar kebiasaan${fcNote} - Action: naikkan budget 10-20% selagi momentum masih ada.`
+ : `${sa.seg}: ${mLabel} turun di luar kebiasaan${fcNote} - Action: tahan budget, audit channel &amp; tahap funnel yang macet.`;
  if (tier === "watch") return driver.z > 0
- ? `${sa.seg}: ${mLabel} mulai naik (belum signifikan) - Action: uji kecil dulu sebelum komit besar.`
- : `${sa.seg}: ${mLabel} mulai turun (belum signifikan) - Action: investigasi dini.`;
- return `${sa.seg}: ${mLabel} stabil - Action: pertahankan strategi saat ini.`;
+ ? `${sa.seg}: ${mLabel} mulai naik (belum signifikan)${fcNote} - Action: uji kecil dulu sebelum komit besar.`
+ : `${sa.seg}: ${mLabel} mulai turun (belum signifikan)${fcNote} - Action: investigasi dini.`;
+ return `${sa.seg}: ${mLabel} stabil${fcNote} - Action: pertahankan strategi saat ini.`;
  }).filter(Boolean);
 
  el.innerHTML = firHtml(findings, insight, recParts.join(' '));
@@ -2235,7 +2311,8 @@ function renderChannelEngageChart(f){
  const ctx = document.getElementById("channelEngageChart").getContext("2d");
  const prevMonthLabel = MONTHS[NUM_MONTHS-2] || MONTHS[0], lastMonthLabel = MONTHS[NUM_MONTHS-1];
  const titleEl = document.getElementById("engageTitle");
- if (titleEl) titleEl.textContent = `Engagement per Channel - ${prevMonthLabel} vs ${lastMonthLabel}`;
+ if (titleEl) titleEl.textContent = `Engagement per Channel - ${prevMonthLabel} vs ${lastMonthLabel}` +
+ (BUDGET_M_IS_CURRENT ? ` (${lastMonthLabel}: bar = aktual s.d. hari ini, analisa = proyeksi akhir bulan)` : '');
  const segList = segs(f.seg);
  const chList = chans(f.ch);
 
@@ -2247,8 +2324,36 @@ function renderChannelEngageChart(f){
  const sentJun = sum("sent","Jun"), deliveredJun = sum("delivered","Jun"), clickJun = sum("click","Jun"), openJun = sum("open","Jun");
  const sentJul = sum("sent","Jul"), deliveredJul = sum("delivered","Jul"), clickJul = sum("click","Jul"), openJul = sum("open","Jul");
 
+ // When the latest month (Jul-suffixed vars = LAST_M, could be a fully in-progress month like
+ // "Agustus" in the live data) is still running, forecast its Sent/Delivered/Click/Open to month-end
+ // (per dashboard segment -> srcSeg, same double-count convention as sum() above for consistency)
+ // BEFORE computing rates and running the significance test - otherwise a partial month's volume and
+ // rate mix gets compared straight against a full month, which isn't apples-to-apples.
+ let sentJulF = sentJul, deliveredJulF = deliveredJul, clickJulF = clickJul, openJulF = openJul;
+ let engageIsForecast = false, engageAsOfDay = null, engageDaysInM = null;
+ if (BUDGET_M_IS_CURRENT && FORECAST_SOURCE_UPPER && FORECAST_SOURCE_UPPER.maxDate) {
+ const forecastMetric = (metric) => {
+ let total = 0, any = false;
+ segList.forEach(seg => {
+ const srcSeg = COST_SOURCE_SEG[seg];
+ if (!srcSeg) return;
+ const fc = forecastMonthEndFor(FORECAST_SOURCE_UPPER.bySegDate, FORECAST_SOURCE_UPPER.bySegChDate, FORECAST_SOURCE_UPPER.maxDate, [srcSeg], chList, metric);
+ if (fc) { total += fc.forecast; any = true; if (engageAsOfDay == null) { engageAsOfDay = fc.asOfDay; engageDaysInM = fc.daysInMonth; } }
+ });
+ return any ? total : null;
+ };
+ const sentF = forecastMetric("sent");
+ if (sentF != null) {
+ sentJulF = sentF; deliveredJulF = forecastMetric("delivered"); clickJulF = forecastMetric("click"); openJulF = forecastMetric("open");
+ engageIsForecast = true;
+ }
+ }
+
  // Rates computed from the aggregated totals above (not averaged from per-channel sheet %), so
- // they stay correct under any multi-select segment/channel combination.
+ // they stay correct under any multi-select segment/channel combination. Chart bars use the raw
+ // MTD actual (sentJul etc.) so the chart never shows a number that isn't really in the sheet;
+ // the *Jul rates below double as chart-line values, computed from actual (not forecast) for the
+ // same reason - the FIR text further down is where the forecast-based comparison happens.
  const deliveryRateJun = sentJun ? deliveredJun/sentJun : null, deliveryRateJul = sentJul ? deliveredJul/sentJul : null;
  const readRateJun = deliveredJun ? openJun/deliveredJun : null, readRateJul = deliveredJul ? openJul/deliveredJul : null;
  const clickRateJun = sentJun ? clickJun/sentJun : null, clickRateJul = sentJul ? clickJul/sentJul : null;
@@ -2288,34 +2393,39 @@ function renderChannelEngageChart(f){
  if (!sentJun || !sentJul) {
  el.innerHTML = firHtml("Tidak ada data Sent untuk kombinasi filter ini.","-","-");
  } else {
- const delivTest = twoProportionZTest(deliveredJul, sentJul, deliveredJun, sentJun);
- const clickTest = twoProportionZTest(clickJul, sentJul, clickJun, sentJun);
+ const delivTest = twoProportionZTest(deliveredJulF, sentJulF, deliveredJun, sentJun);
+ const clickTest = twoProportionZTest(clickJulF, sentJulF, clickJun, sentJun);
  const delivV = zVerdict(delivTest.z), clickV = zVerdict(clickTest.z);
  let readPart = "";
- if (openJun && openJul && deliveredJun && deliveredJul) {
- const readTest = twoProportionZTest(openJul, deliveredJul, openJun, deliveredJun);
- readPart = ` Read rate: ${pct(readTest.p2,2)} (${prevMonthLabel}) → ${pct(readTest.p1,2)} (${lastMonthLabel}), ${zVerdict(readTest.z).text} (z=${readTest.z.toFixed(2)}).`;
+ if (openJun && openJulF && deliveredJun && deliveredJulF) {
+ const readTest = twoProportionZTest(openJulF, deliveredJulF, openJun, deliveredJun);
+ readPart = ` Read rate: ${pct(readTest.p2,2)} (${prevMonthLabel}) → ${pct(readTest.p1,2)} (${lastMonthLabel}${engageIsForecast?' proyeksi':''}), ${zVerdict(readTest.z).text} (z=${readTest.z.toFixed(2)}).`;
  }
- const findings = `Delivery rate: ${pct(delivTest.p2,2)} (${prevMonthLabel}) → ${pct(delivTest.p1,2)} (${lastMonthLabel}). Click rate (dari Sent): ${pct(clickTest.p2,2)} (${prevMonthLabel}) → ${pct(clickTest.p1,2)} (${lastMonthLabel}).${readPart}`;
- const insight = `Perubahan delivery rate ${delivV.text} (z=${delivTest.z.toFixed(2)}). Perubahan click rate ${clickV.text} (z=${clickTest.z.toFixed(2)}).`;
+ const lastLabelTxt = engageIsForecast ? `${lastMonthLabel} proyeksi` : lastMonthLabel;
+ const mtdNote = engageIsForecast
+ ? ` (Aktual s.d. hari ke-${engageAsOfDay}/${engageDaysInM}: Sent ${nf(sentJul)}, Delivered ${nf(deliveredJul)}, Click ${nf(clickJul)} - diproyeksikan ke full bulan pakai regresi linear sebelum dibandingkan, supaya apple-to-apple vs ${prevMonthLabel} yang sudah 1 bulan penuh.)`
+ : '';
+ const findings = `Delivery rate: ${pct(delivTest.p2,2)} (${prevMonthLabel}) → ${pct(delivTest.p1,2)} (${lastLabelTxt}). Click rate (dari Sent): ${pct(clickTest.p2,2)} (${prevMonthLabel}) → ${pct(clickTest.p1,2)} (${lastLabelTxt}).${readPart}${mtdNote}`;
+ const insight = `Perubahan delivery rate ${delivV.text} (z=${delivTest.z.toFixed(2)}). Perubahan click rate ${clickV.text} (z=${clickTest.z.toFixed(2)}).${engageIsForecast?' (dihitung dari proyeksi akhir bulan, bukan volume parsial.)':''}`;
  const delivTier = zTier(delivTest.z), clickTier = zTier(clickTest.z);
+ const fcNote = engageIsForecast ? ' (berdasar proyeksi akhir bulan, bulan masih berjalan - re-cek lagi setelah bulan tutup.)' : '';
  let recommendation;
  if (delivTier === "strong" || delivTier === "significant") {
  recommendation = delivTest.z < 0
- ? `Delivery rate turun ${delivV.level==='bad'?'tajam':'signifikan'} - Action: (1) audit kualitas nomor/kontak (cek bounce/invalid rate), (2) cek apakah ada perubahan kebijakan dari provider WhatsApp/Email, (3) TAHAN dulu penambahan volume kirim sampai delivery rate pulih - nambah volume saat delivery jelek cuma buang cost.`
- : `Delivery rate naik signifikan - Action: pertahankan setup pengiriman saat ini, aman buat nambah volume kirim.`;
+ ? `Delivery rate turun ${delivV.level==='bad'?'tajam':'signifikan'}${fcNote} - Action: (1) audit kualitas nomor/kontak (cek bounce/invalid rate), (2) cek apakah ada perubahan kebijakan dari provider WhatsApp/Email, (3) TAHAN dulu penambahan volume kirim sampai delivery rate pulih - nambah volume saat delivery jelek cuma buang cost.`
+ : `Delivery rate naik signifikan${fcNote} - Action: pertahankan setup pengiriman saat ini, aman buat nambah volume kirim.`;
  } else if (clickTier === "strong" || clickTier === "significant") {
  recommendation = clickTest.z < 0
- ? `Click rate turun signifikan walau delivery normal - Action: ini soal konten/relevansi, bukan teknis. Ganti konten pesan atau waktu kirim, coba A/B test 2 varian konten minggu depan.`
- : `Click rate naik signifikan - Action: identifikasi apa yang beda (waktu kirim, konten, segmentasi audiens) dan replikasi ke channel/segmen lain.`;
+ ? `Click rate turun signifikan walau delivery normal${fcNote} - Action: ini soal konten/relevansi, bukan teknis. Ganti konten pesan atau waktu kirim, coba A/B test 2 varian konten minggu depan.`
+ : `Click rate naik signifikan${fcNote} - Action: identifikasi apa yang beda (waktu kirim, konten, segmentasi audiens) dan replikasi ke channel/segmen lain.`;
  } else if (delivTier === "watch" || clickTier === "watch") {
  const which = delivTier === "watch" ? "Delivery rate" : "Click rate";
  const dir = delivTier === "watch" ? delivTest.z : clickTest.z;
  recommendation = dir < 0
- ? `${which} mulai menurun (belum signifikan) - Action: mulai pantau harian, siapkan rencana cadangan (ganti konten/waktu kirim) kalau trennya berlanjut minggu depan.`
- : `${which} mulai membaik (belum signifikan) - Action: pantau 1-2 siklus lagi sebelum menyimpulkan ini perbaikan permanen.`;
+ ? `${which} mulai menurun (belum signifikan)${fcNote} - Action: mulai pantau harian, siapkan rencana cadangan (ganti konten/waktu kirim) kalau trennya berlanjut minggu depan.`
+ : `${which} mulai membaik (belum signifikan)${fcNote} - Action: pantau 1-2 siklus lagi sebelum menyimpulkan ini perbaikan permanen.`;
  } else {
- recommendation = `Engagement rate masih stabil - Action: tidak ada tindakan mendesak, lanjutkan strategi konten &amp; jadwal kirim saat ini.`;
+ recommendation = `Engagement rate masih stabil${fcNote} - Action: tidak ada tindakan mendesak, lanjutkan strategi konten &amp; jadwal kirim saat ini.`;
  }
  el.innerHTML = firHtml(findings, insight, recommendation);
  }
@@ -2357,7 +2467,9 @@ function renderCpaChart(f){
  const rows = list.map((seg,i) => (jun[i] && jul[i]!=null) ? { seg, jun: jun[i], jul: jul[i], change: (jul[i]-jun[i])/jun[i] } : null).filter(Boolean);
  if (!rows.length) { el.innerHTML = firHtml("Data CPA belum lengkap untuk dibandingkan.","-","-"); }
  else {
- const findings = rows.map(r => `${r.seg}: CPA ${rp(r.jun)} (${prevMonthLabel}) → ${rp(r.jul)} (${lastMonthLabel}), ${r.change>=0?'+':''}${pct(r.change,1)}`).join('; ') + '.';
+ const partialNote = BUDGET_M_IS_CURRENT
+ ? ` (Catatan: ${lastMonthLabel} masih bulan berjalan dan Cost Detail cuma tersedia bulanan - tidak ada data harian buat di-forecast ke full bulan seperti section Trend/Engagement, jadi CPA ${lastMonthLabel} di atas masih angka parsial, bukan proyeksi akhir bulan. Hati-hati membaca perubahannya.)` : '';
+ const findings = rows.map(r => `${r.seg}: CPA ${rp(r.jun)} (${prevMonthLabel}) → ${rp(r.jul)} (${lastMonthLabel})${BUDGET_M_IS_CURRENT?' parsial':''}, ${r.change>=0?'+':''}${pct(r.change,1)}`).join('; ') + '.' + partialNote;
  // Only 2 data points -> no real z-test possible (need >=3 for a variance estimate). Use tiered
  // materiality bands instead: >30% = act now, 15-30% = watch, <15% = stable.
  rows.forEach(r => { const a = Math.abs(r.change); r.tier = a > 0.3 ? "strong" : (a > 0.15 ? "watch" : "stable"); });
@@ -2477,7 +2589,9 @@ function funnelRatioFIR(list, uptoMonth){
  // then run a two-proportion z-test: is this month's Paid Out/Created rate really different, or just noise?
  const el = document.getElementById("funnelRatioFIR");
  if (!el) return;
- const lastM = uptoMonth === "all" ? 6 : uptoMonth;
+ // NOTE: was hardcoded to month index 6 (Jul) for "all" regardless of how many months of data have
+ // since arrived - fixed to track the real latest month, same convention as the other FIR sections.
+ const lastM = uptoMonth === "all" ? (NUM_MONTHS - 1) : uptoMonth;
  if (lastM === 0) { el.innerHTML = firHtml("Bulan awal periode - belum ada pembanding.","-","-"); return; }
  let curCreated=0, curPO=0, priorCreated=0, priorPO=0;
  list.forEach(seg => {
@@ -2488,22 +2602,40 @@ function funnelRatioFIR(list, uptoMonth){
  }
  });
  if (!curCreated || !priorCreated) { el.innerHTML = firHtml("Data belum cukup untuk uji statistik.","-","-"); return; }
+
+ // Both Created and Paid Out have a daily source (Lower Funnel log), so - unlike CPA/cost-based
+ // sections - this ratio CAN be properly forecast to month-end when the latest month is still
+ // in progress, instead of just flagged as partial.
+ let ratioIsForecast = false, curCreatedActual = curCreated, curPOActual = curPO, ratioAsOfDay = null, ratioDaysInM = null;
+ if (BUDGET_M_IS_CURRENT && lastM === NUM_MONTHS - 1 && FORECAST_SOURCE && FORECAST_SOURCE.maxDate) {
+ const fcCreated = forecastMonthEndFor(FORECAST_SOURCE.bySegDate, FORECAST_SOURCE.bySegChDate, FORECAST_SOURCE.maxDate, list, ALL_CHANNELS, "created");
+ const fcPO = forecastMonthEndFor(FORECAST_SOURCE.bySegDate, FORECAST_SOURCE.bySegChDate, FORECAST_SOURCE.maxDate, list, ALL_CHANNELS, "paidOut");
+ if (fcCreated && fcPO) {
+ curCreated = fcCreated.forecast; curPO = fcPO.forecast;
+ ratioAsOfDay = fcCreated.asOfDay; ratioDaysInM = fcCreated.daysInMonth; ratioIsForecast = true;
+ }
+ }
+
  const test = twoProportionZTest(curPO, curCreated, priorPO, priorCreated);
  const v = zVerdict(test.z);
- const findings = `Rasio Paid Out/Created bulan ${MONTHS[lastM]} = ${pct(test.p1,2)} (${nf(curPO)}/${nf(curCreated)}), dibanding rata-rata bulan-bulan sebelumnya ${pct(test.p2,2)} (${nf(priorPO)}/${nf(priorCreated)}).`;
- const insight = `Selisih ini ${v.text} secara statistik (two-proportion z-test, z=${test.z.toFixed(2)}) - artinya ${Math.abs(test.z)>=1.96 ? 'kemungkinan besar ada penyebab nyata (bukan kebetulan sample), ' : 'kemungkinan besar cuma variasi wajar dari bulan ke bulan, '}mengingat ukuran sample datanya.`;
+ const lastMLabel = ratioIsForecast ? `${MONTHS[lastM]} (proyeksi akhir bulan)` : MONTHS[lastM];
+ const mtdNote = ratioIsForecast
+ ? ` (Aktual s.d. tgl ${ratioAsOfDay}/${ratioDaysInM}: ${nf(curPOActual)}/${nf(curCreatedActual)} = ${pct(curCreatedActual?curPOActual/curCreatedActual:0,2)} - diproyeksikan dulu ke full bulan sebelum dibandingkan.)` : '';
+ const findings = `Rasio Paid Out/Created bulan ${lastMLabel} = ${pct(test.p1,2)} (${nf(curPO)}/${nf(curCreated)}), dibanding rata-rata bulan-bulan sebelumnya ${pct(test.p2,2)} (${nf(priorPO)}/${nf(priorCreated)}).${mtdNote}`;
+ const insight = `Selisih ini ${v.text} secara statistik (two-proportion z-test, z=${test.z.toFixed(2)}) - artinya ${Math.abs(test.z)>=1.96 ? 'kemungkinan besar ada penyebab nyata (bukan kebetulan sample), ' : 'kemungkinan besar cuma variasi wajar dari bulan ke bulan, '}mengingat ukuran sample datanya.${ratioIsForecast ? ' (Dihitung dari proyeksi akhir bulan, bukan rasio parsial.)' : ''}`;
  const tier = zTier(test.z);
+ const fcRecNote = ratioIsForecast ? ' (berdasar proyeksi akhir bulan, bulan masih berjalan.)' : '';
  let recommendation;
  if (tier === "strong" || tier === "significant") {
  recommendation = test.z < 0
- ? `Conversion rate turun ${v.level==='bad'?'tajam':'signifikan'} - Action: (1) buka tabel di atas, cek pp-deviation tiap tahap (First Filter/Eligible/Accepted/Paid Out) buat nemuin tahap yang paling anjlok, (2) tahan penambahan volume kirim sampai tahap itu diperbaiki, (3) kalau After FF yang drop → cek kualitas lead/targeting; kalau Accepted→Paid Out yang drop → cek proses approval/verifikasi.`
- : `Conversion rate naik signifikan - Action: identifikasi apa yang beda bulan ini (channel, campaign, kriteria targeting) dan replikasi ke segmen/bulan berikutnya sebelum efeknya hilang. Pertimbangkan naikkan volume kirim 10-15% selagi rate-nya lagi bagus.`;
+ ? `Conversion rate turun ${v.level==='bad'?'tajam':'signifikan'}${fcRecNote} - Action: (1) buka tabel di atas, cek pp-deviation tiap tahap (First Filter/Eligible/Accepted/Paid Out) buat nemuin tahap yang paling anjlok, (2) tahan penambahan volume kirim sampai tahap itu diperbaiki, (3) kalau After FF yang drop → cek kualitas lead/targeting; kalau Accepted→Paid Out yang drop → cek proses approval/verifikasi.`
+ : `Conversion rate naik signifikan${fcRecNote} - Action: identifikasi apa yang beda bulan ini (channel, campaign, kriteria targeting) dan replikasi ke segmen/bulan berikutnya sebelum efeknya hilang. Pertimbangkan naikkan volume kirim 10-15% selagi rate-nya lagi bagus.`;
  } else if (tier === "watch") {
  recommendation = test.z < 0
- ? `Ada indikasi conversion rate mulai turun (belum signifikan penuh) - Action: cek tabel pp-deviation per tahap sekarang, jangan tunggu sampai signifikan - lebih murah investigasi dini daripada telat.`
- : `Ada indikasi conversion rate mulai naik (belum signifikan penuh) - Action: pantau 1 bulan lagi buat konfirmasi sebelum realokasi budget besar-besaran.`;
+ ? `Ada indikasi conversion rate mulai turun (belum signifikan penuh)${fcRecNote} - Action: cek tabel pp-deviation per tahap sekarang, jangan tunggu sampai signifikan - lebih murah investigasi dini daripada telat.`
+ : `Ada indikasi conversion rate mulai naik (belum signifikan penuh)${fcRecNote} - Action: pantau 1 bulan lagi buat konfirmasi sebelum realokasi budget besar-besaran.`;
  } else {
- recommendation = `Rasio konversi stabil - Action: alokasi budget saat ini masih proporsional, tidak perlu perubahan.`;
+ recommendation = `Rasio konversi stabil${fcRecNote} - Action: alokasi budget saat ini masih proporsional, tidak perlu perubahan.`;
  }
  el.innerHTML = firHtml(findings, insight, recommendation);
 }
@@ -2721,15 +2853,19 @@ function renderCostByChannelTable(f){
 
 // ===================== CHANNEL TABLE =====================
 function cpcStats(seg, ch){
- // CPC Jan..Jul, lalu baseline = median dari sampai 3 bulan valid (klik>0) sebelum Juli - robust terhadap outlier dibanding rata-rata/z-score.
+ // CPC Jan..(latest month), lalu baseline = median dari sampai 3 bulan valid (klik>0) sebelum bulan
+ // terakhir - robust terhadap outlier dibanding rata-rata/z-score.
+ // NOTE: previously hardcoded to index 6 (Jul) as "the latest month" regardless of how many months of
+ // data have since arrived - fixed to track NUM_MONTHS dynamically, same as the other FIR sections.
  const costArr = COST_BY_CHANNEL[seg][ch];
  const clickArr = CHANNEL_DETAIL[seg][ch] ? CHANNEL_DETAIL[seg][ch].click : null;
  if (!costArr || !clickArr) return null;
+ const lastIdx = NUM_MONTHS - 1;
  const cpc = costArr.map((c,i) => clickArr[i] ? c/clickArr[i] : null);
- const julCpc = cpc[6];
+ const julCpc = cpc[lastIdx];
  if (julCpc == null) return null;
  const priorValid = [];
- for (let i = 5; i >= 0 && priorValid.length < 3; i--) { if (cpc[i] != null) priorValid.push(cpc[i]); }
+ for (let i = lastIdx-1; i >= 0 && priorValid.length < 3; i--) { if (cpc[i] != null) priorValid.push(cpc[i]); }
  if (priorValid.length === 0) return null;
  const sorted = [...priorValid].sort((a,b)=>a-b);
  const mid = Math.floor(sorted.length/2);
@@ -2765,7 +2901,7 @@ function renderChannelInsight(f){
  let html = "";
  if (cards.length) {
  html += `<h3 style='font-size:11.5px;margin:14px 0 4px;'> Alert CPC - Analisis Statistik</h3>
- <div class='note' style='margin:0 0 6px;font-size:10px;'>Baseline = median CPC 3 bulan sebelumnya (median dipilih karena tahan terhadap bulan-bulan outlier, dibanding rata-rata biasa).</div>`;
+ <div class='note' style='margin:0 0 6px;font-size:10px;'>Baseline = median CPC 3 bulan sebelumnya (median dipilih karena tahan terhadap bulan-bulan outlier, dibanding rata-rata biasa).${BUDGET_M_IS_CURRENT ? ' Catatan: bulan terakhir masih berjalan dan Cost Detail cuma tersedia bulanan (tidak ada data harian buat di-forecast), jadi CPC di bawah ini masih dihitung dari cost & klik yang baru sebagian bulan - deviasinya bisa berubah setelah bulan tutup.' : ''}</div>`;
  cards.sort((a,b)=>b.devPct-a.devPct).forEach(c => {
  html += `<div class='balert-msg ${c.cls}' style='margin-top:8px;align-items:flex-start;font-size:11px;font-weight:400;'>
  <span>${c.icon}</span>
@@ -2855,7 +2991,8 @@ function renderCostRatioTable(f){
  else {
  const rJun = junCost/junAmt, rJul = julCost/julAmt;
  const change = (rJul-rJun)/rJun;
- const findings = `Cost Ratio (pooled, segmen terpilih): ${pct(rJun,2)} (${prevML}) → ${pct(rJul,2)} (${lastML}), ${change>=0?'+':''}${pct(change,1)}. Return (Paid Out Amount / Cost): ${(1/rJun).toFixed(1)}x → ${(1/rJul).toFixed(1)}x.`;
+ const partialNote = BUDGET_M_IS_CURRENT ? ` (Catatan: ${lastML} masih bulan berjalan, Paid Out Amount & Cost cuma tersedia bulanan jadi tidak ada dasar buat di-forecast ke full bulan - angka ${lastML} di atas masih parsial.)` : '';
+ const findings = `Cost Ratio (pooled, segmen terpilih): ${pct(rJun,2)} (${prevML}) → ${pct(rJul,2)} (${lastML}${BUDGET_M_IS_CURRENT?' parsial':''}), ${change>=0?'+':''}${pct(change,1)}. Return (Paid Out Amount / Cost): ${(1/rJun).toFixed(1)}x → ${(1/rJul).toFixed(1)}x.${partialNote}`;
  const absC = Math.abs(change);
  const tier = absC > 0.2 ? "strong" : (absC > 0.1 ? "watch" : "stable");
  const insight = `Cuma 2 titik data (${prevML}, ${lastML}) - belum bisa diuji signifikansi statistiknya secara formal, jadi dipakai ambang materialitas bertingkat (>20% = perlu tindakan, 10-20% = waspada).` +
