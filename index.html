@@ -216,7 +216,7 @@
  <span id="statusText">Memuat data dari Google Sheet...</span>
  <div>
  <button id="refreshBtn" onclick="loadLiveData()" style="border:1px solid var(--border);background:var(--stripe);color:var(--blue-dark);border-radius:6px;padding:5px 12px;font-size:11px;cursor:pointer;font-weight:600;"> Refresh Data</button>
- <div class="note" style="margin-top:4px;text-align:right;">Auto-refresh setiap 1 jam</div>
+ <div class="note" style="margin-top:4px;text-align:right;">Auto-refresh tiap 2 menit + otomatis saat tab dibuka lagi</div>
  </div>
  </div>
 
@@ -635,6 +635,8 @@ function buildUpperIndex(rows){
  const bySegDate = {}, bySegChDate = {};
  let maxDate = null;
  const unrecognizedSeg = {}, unrecognizedChannel = {};
+ let dateParseFailCount = 0;
+ const dateParseFailSamples = []; // a few raw values that failed to parse, surfaced in the debug panel
  for (let i = dataStart; i < rows.length; i++) {
  const rawSeg = cellAtCol(rows, i, col.segment);
  if (!rawSeg) continue;
@@ -644,9 +646,9 @@ function buildUpperIndex(rows){
  const ch = UPPER_CH_TO_DASH[rawCh];
  if (!ch) { if (rawCh && rawCh !== "Lainnya") unrecognizedChannel[rawCh] = (unrecognizedChannel[rawCh]||0)+1; continue; }
  const rawDate = cellAtCol(rows, i, col.date);
- const dateMatch = rawDate.match(/^(\d{4})[-\/](\d{2})[-\/](\d{2})/);
- if (!dateMatch) continue;
- const month = parseInt(dateMatch[2], 10);
+ const d = parseFlexibleDate(rawDate);
+ if (!d) { if (rawDate) { dateParseFailCount++; if (dateParseFailSamples.length < 5) dateParseFailSamples.push(rawDate); } continue; }
+ const month = parseInt(d.m, 10);
  if (!month || month < 1 || month > 12) continue;
  const v = {
  sent: valAtCol(rows, i, col.sent) || 0,
@@ -659,7 +661,7 @@ function buildUpperIndex(rows){
  agg[srcSeg][ch][month] = agg[srcSeg][ch][month] || { sent:0, delivered:0, click:0, open:0 };
  Object.keys(v).forEach(k => agg[srcSeg][ch][month][k] += v[k]);
 
- const dateStr = `${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}`;
+ const dateStr = `${d.y}-${d.m}-${d.d}`;
  bySegDate[srcSeg] = bySegDate[srcSeg] || {};
  bySegDate[srcSeg][dateStr] = bySegDate[srcSeg][dateStr] || { sent:0, delivered:0, click:0, open:0 };
  Object.keys(v).forEach(k => bySegDate[srcSeg][dateStr][k] += v[k]);
@@ -670,7 +672,7 @@ function buildUpperIndex(rows){
  Object.keys(v).forEach(k => bySegChDate[srcSeg][ch][dateStr][k] += v[k]);
  if (!maxDate || dateStr > maxDate) maxDate = dateStr;
  }
- return { agg, bySegDate, bySegChDate, maxDate, unrecognizedSeg, unrecognizedChannel, missingColumns: missing, totalRowsRead: rows.length - dataStart };
+ return { agg, bySegDate, bySegChDate, maxDate, unrecognizedSeg, unrecognizedChannel, missingColumns: missing, totalRowsRead: rows.length - dataStart, dateParseFailCount, dateParseFailSamples };
 }
 
 // Cost Detail's month columns are matched by header text ("Jan 2026".."Dec 2026") instead of assumed
@@ -754,6 +756,21 @@ function resolveColumnsByHeader(rows, labelMap){
 function cellAtCol(rows, row0, col1){ return col1 == null ? "" : cellText(rows, row0, col1); }
 function valAtCol(rows, row0, col1){ return col1 == null ? null : valAt(rows, row0, col1); }
 
+// Accepts "YYYY-MM-DD"/"YYYY/MM/DD" (preferred, unambiguous) first, then falls back to
+// "DD-MM-YYYY"/"DD/MM/YYYY" (day-first, matching Indonesian/Sheets locale defaults) if the string
+// doesn't start with a 4-digit year. Returns {y,m,d} (m/d zero-padded strings) or null if neither
+// pattern matches - used by both Lower and Upper Funnel log parsing so a date-format change in the
+// sheet (e.g. switching which order day/month are written in) doesn't silently drop every row.
+function parseFlexibleDate(raw){
+ if (!raw) return null;
+ const s = String(raw).trim();
+ let m = s.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/);
+ if (m) return { y: m[1], m: m[2].padStart(2,'0'), d: m[3].padStart(2,'0') };
+ m = s.match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})/);
+ if (m) return { y: m[3], m: m[2].padStart(2,'0'), d: m[1].padStart(2,'0') };
+ return null;
+}
+
 const LOWER_LOG_LABELS = { date:"Created Date", segment:["Segment","Segment 2","Segment 1"], channel:"Channel Attribute Logic", created:"Created Apps", afterFF:"After First Filter", eligible:"Eligible", accepted:"Accepted Apps", paidOut:"Paid Out", paidOutAmount:"Paid Out Amount", month:"Month" };
 
 function parseLowerFunnelLog(rows){
@@ -792,8 +809,8 @@ function parseLowerFunnelLog(rows){
  const seg = RAW_SEG_TO_DASH_SEG[rawSeg];
  if (!seg) { unrecognizedSeg[rawSeg] = (unrecognizedSeg[rawSeg]||0) + 1; continue; }
  const rawDateCell = cellAtCol(rows, i, col.date);
- const dateMatch = rawDateCell.match(/^(\d{4})[-\/](\d{2})[-\/](\d{2})/); // accepts "2026-07-27" or "2026/07/27", tolerates trailing time/whitespace
- const dateStr = dateMatch ? `${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}` : null; // normalized to YYYY-MM-DD regardless of source separator, since this is used as a dict key and compared lexicographically for maxDate
+ const parsedDate = parseFlexibleDate(rawDateCell); // accepts "2026-07-27"/"2026/07/27" (preferred) or "27-07-2026"/"27/07/2026" (fallback)
+ const dateStr = parsedDate ? `${parsedDate.y}-${parsedDate.m}-${parsedDate.d}` : null; // normalized to YYYY-MM-DD regardless of source format, since this is used as a dict key and compared lexicographically for maxDate
  if (!dateStr && rawDateCell) { dateParseFailCount++; if (dateParseFailSamples.length < 5) dateParseFailSamples.push(rawDateCell); }
  const monthColVal = monthColMissing ? null : parseInt(cellAtCol(rows, i, col.month), 10);
  let month = dateStr ? parseInt(dateStr.slice(5,7), 10) : (monthColVal >= 1 && monthColVal <= 12 ? monthColVal : null);
@@ -1177,7 +1194,7 @@ function detectNumMonths(lowerAgg, targetAgg){
 
 function computeFromSheets(lowerRows, upperRows, costRows, targetRows, budgetMonthlyRows){
  const SEGS = ALL_SEGMENTS;
- const { agg: upperIdx, bySegDate: upperBySegDate, bySegChDate: upperBySegChDate, maxDate: upperMaxDate, unrecognizedSeg: upperUnrecognizedSeg, unrecognizedChannel: upperUnrecognizedChannel, missingColumns: upperMissingColumns } = buildUpperIndex(upperRows);
+ const { agg: upperIdx, bySegDate: upperBySegDate, bySegChDate: upperBySegChDate, maxDate: upperMaxDate, unrecognizedSeg: upperUnrecognizedSeg, unrecognizedChannel: upperUnrecognizedChannel, missingColumns: upperMissingColumns, dateParseFailCount: upperDateParseFailCount, dateParseFailSamples: upperDateParseFailSamples } = buildUpperIndex(upperRows);
  const costIdx = buildCostIndex(costRows);
  const { bySeg: lowerAgg, bySegCh: lowerAggCh, bySegDate, bySegChDate, maxDate, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, monthMismatchCount, monthMismatchSamples } = parseLowerFunnelLog(lowerRows);
  const { bySeg: targetAgg, missingColumns: targetMissingColumns, unrecognizedSeg: targetUnrecognizedSeg, unrecognizedMonth: targetUnrecognizedMonth, unrecognizedFunnel: targetUnrecognizedFunnel } = parseTargetLog(targetRows);
@@ -1336,7 +1353,7 @@ function computeFromSheets(lowerRows, upperRows, costRows, targetRows, budgetMon
  forecastSource: { bySegChDate, bySegDate, maxDate },
  forecastSourceUpper: { bySegChDate: upperBySegChDate, bySegDate: upperBySegDate, maxDate: upperMaxDate },
  targetAgg,
- debug: { lowerRows, upperRows, costRows, targetRows, budgetMonthlyRows, lowerAgg, lowerAggCh, targetAgg, budgetMonthlyAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, monthMismatchCount, monthMismatchSamples, targetMissingColumns, targetUnrecognizedSeg, targetUnrecognizedMonth, targetUnrecognizedFunnel, budgetMonthlyMissingColumns, budgetMonthlyUnrecognizedMonth, upperUnrecognizedSeg, upperUnrecognizedChannel, upperMissingColumns, upperIdx, costIdx } };
+ debug: { lowerRows, upperRows, costRows, targetRows, budgetMonthlyRows, lowerAgg, lowerAggCh, targetAgg, budgetMonthlyAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, monthMismatchCount, monthMismatchSamples, targetMissingColumns, targetUnrecognizedSeg, targetUnrecognizedMonth, targetUnrecognizedFunnel, budgetMonthlyMissingColumns, budgetMonthlyUnrecognizedMonth, upperUnrecognizedSeg, upperUnrecognizedChannel, upperMissingColumns, upperDateParseFailCount, upperDateParseFailSamples, upperIdx, costIdx } };
 }
 
 // ===================== DEBUG PANEL (self-diagnosis, no DevTools needed) =====================
@@ -1353,7 +1370,7 @@ function renderDebugPanel(){
  const el = document.getElementById("debugPanelBody");
  if (!el) return;
  if (!LAST_DEBUG) { el.innerHTML = `<p class='note'>Belum ada data live (masih pakai fallback/cache) - debug panel hanya aktif setelah fetch live berhasil.</p>`; return; }
- const { lowerRows, upperRows, costRows, targetRows, budgetMonthlyRows, lowerAgg, lowerAggCh, targetAgg, budgetMonthlyAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, monthMismatchCount, monthMismatchSamples, targetMissingColumns, targetUnrecognizedSeg, targetUnrecognizedMonth, targetUnrecognizedFunnel, budgetMonthlyMissingColumns, budgetMonthlyUnrecognizedMonth, upperUnrecognizedSeg, upperUnrecognizedChannel, upperMissingColumns, upperIdx, costIdx } = LAST_DEBUG;
+ const { lowerRows, upperRows, costRows, targetRows, budgetMonthlyRows, lowerAgg, lowerAggCh, targetAgg, budgetMonthlyAgg, unrecognizedSeg, unrecognizedChannel, missingColumns, dateParseFailCount, dateParseFailSamples, monthMismatchCount, monthMismatchSamples, targetMissingColumns, targetUnrecognizedSeg, targetUnrecognizedMonth, targetUnrecognizedFunnel, budgetMonthlyMissingColumns, budgetMonthlyUnrecognizedMonth, upperUnrecognizedSeg, upperUnrecognizedChannel, upperMissingColumns, upperDateParseFailCount, upperDateParseFailSamples, upperIdx, costIdx } = LAST_DEBUG;
  let html = "";
 
  if (upperMissingColumns && upperMissingColumns.length) {
@@ -1366,6 +1383,9 @@ function renderDebugPanel(){
  const uUnrecChKeys = Object.keys(upperUnrecognizedChannel || {});
  if (uUnrecChKeys.length) {
  html += `<div class='balert-msg warn' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[WARNING]</span><div><b>Nilai Channel 1 tidak dikenali di Upper Funnel log:</b> ${uUnrecChKeys.map(k=>`"${k}" (${upperUnrecognizedChannel[k]} baris)`).join(', ')} - kode cuma kenal persis "Push Notification", "Email", "WhatsApp", "Sales AI" ("Lainnya" sengaja diabaikan).</div></div>`;
+ }
+ if (upperDateParseFailCount) {
+ html += `<div class='balert-msg bad' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[ALERT]</span><div><b>Tanggal di kolom "Sent Date" (Upper Funnel) gagal di-parse untuk ${nf(upperDateParseFailCount)} baris:</b> contoh nilai mentah yang gagal: ${upperDateParseFailSamples.map(s=>`"${s}"`).join(', ')} - kode cuma kenal format "YYYY-MM-DD"/"YYYY/MM/DD" atau "DD-MM-YYYY"/"DD/MM/YYYY". Baris dengan format lain (misal ada nama bulan, atau format lain) di-skip total dari Engagement/Sent/Delivered/Click, walau baris itu lolos cek Segment 2 &amp; Channel 1. Kalau ini angkanya besar (mendekati total baris), kemungkinan besar ini penyebab Engagement/Segmen dashboard di bawah keliatan kosong semua.</div></div>`;
  }
 
  if (targetMissingColumns && targetMissingColumns.length) {
@@ -1451,7 +1471,7 @@ function renderDebugPanel(){
  if (costIdx.__missingMonths && costIdx.__missingMonths.length) {
  html += `<div class='balert-msg bad' style='align-items:flex-start;font-size:11.5px;font-weight:400;margin-bottom:10px;'><span>[ALERT]</span><div><b>Kolom bulan tidak ketemu di header Cost Detail:</b> ${costIdx.__missingMonths.join(', ')} - header row (baris 1) harus punya kolom berlabel persis format ini (contoh: "Aug 2026"). Bulan yang tidak ketemu akan selalu kosong di Cost/CPA/Budget, walau datanya sebenarnya ada di sheet.</div></div>`;
  }
- html += `<h4 style='font-size:12px;margin:14px 0 6px;'>Upper Funnel (log harian) & Cost Detail (masih pivot lama) - dipetakan lewat COST_SOURCE_SEG</h4><p class='note'>Upper Funnel: ${upperRows.length} baris CSV diterima. Cost Detail: ${costRows.length} baris CSV diterima.</p><table class='dt'><thead><tr><th>Segmen dashboard</th><th>Sumber (Segment 2 / Cost Detail)</th><th>Status</th></tr></thead><tbody>`;
+ html += `<h4 style='font-size:12px;margin:14px 0 6px;'>Upper Funnel (log harian) → dipetakan lewat COST_SOURCE_SEG (Cost Detail sengaja tetap format pivot 3-blok, bukan log - lihat tabel Cost Detail terpisah di atas)</h4><p class='note'>Upper Funnel: ${upperRows.length} baris CSV diterima${upperDateParseFailCount ? ` (${nf(upperDateParseFailCount)} di antaranya gagal parse tanggal - lihat alert di atas)` : ''}. Cost Detail: ${costRows.length} baris CSV diterima.</p><table class='dt'><thead><tr><th>Segmen dashboard</th><th>Sumber (Segment 2 / Cost Detail)</th><th>Status</th></tr></thead><tbody>`;
  ALL_SEGMENTS.forEach(seg => {
  const src = COST_SOURCE_SEG[seg];
  let status;
@@ -3484,14 +3504,24 @@ renderPacingCalculator(getFilters()); // calculator has its own internal segment
 onFilterChange(); // render immediately with fallback so page isn't blank
 loadLiveData(); // then attempt live fetch and re-render on success
 
-// Auto-refresh: tarik data terbaru dari Google Sheet setiap 1 jam sebagai background safety net.
-// Filter (Segmen/Channel/Bulan) sekarang juga langsung trigger fetch data baru tiap kali diganti (lihat onchange di select-nya).
-const AUTO_REFRESH_MS = 3600000; // 1 jam
+// Auto-refresh: tarik data terbaru dari Google Sheet tiap 2 menit sebagai background safety net
+// (diperpendek dari 1 jam supaya dashboard lebih dekat ke real-time). Filter (Segmen/Channel/Bulan)
+// juga langsung trigger fetch data baru tiap kali diganti (lihat onchange di select-nya).
+const AUTO_REFRESH_MS = 120000; // 2 menit
 setInterval(() => {
  if (!document.getElementById("refreshBtn").disabled) {
  loadLiveData();
  }
 }, AUTO_REFRESH_MS);
+
+// Refresh instan begitu tab dashboard ini dibuka/difokuskan lagi (misal abis edit sheet di tab lain
+// lalu balik ke tab ini) - ini yang paling kerasa "langsung update" untuk pemakaian sehari-hari,
+// karena tidak perlu nunggu interval 2 menit di atas.
+document.addEventListener("visibilitychange", () => {
+ if (document.visibilityState === "visible" && !document.getElementById("refreshBtn").disabled) {
+ loadLiveData();
+ }
+});
 </script>
 </body>
 </html>
