@@ -171,9 +171,10 @@
  <div class="msdrop-panel" id="segFilterPanel">
  <label><input type="checkbox" value="New" checked onchange="onMultiFilterChange()"> New</label>
  <label><input type="checkbox" value="Repeat" checked onchange="onMultiFilterChange()"> Repeat</label>
- <label><input type="checkbox" value="TopUp" checked onchange="onMultiFilterChange()"> TopUp</label>
+ <label><input type="checkbox" value="TopUp" checked onchange="onMultiFilterChange()"> Top Up PDF</label>
  <label><input type="checkbox" value="LMT" checked onchange="onMultiFilterChange()"> LMT</label>
  <label><input type="checkbox" value="SL" checked onchange="onMultiFilterChange()"> SL</label>
+ <div onclick="selectSegPreset(['Repeat','TopUp'])" style="cursor:pointer;font-size:11px;color:var(--blue-dark);font-weight:600;padding:6px 4px 2px;border-top:1px solid var(--border);margin-top:4px;">▸ Repeat + Top Up PDF (pilih otomatis)</div>
  </div>
  </div>
  <div class="msdrop filter-group" id="chFilterWrap">
@@ -387,6 +388,23 @@ const CH_DISPLAY = { "WhatsApp":"WhatsApp", "Email":"Email", "Push":"Push Notifi
 // belum dipecah per segmen granular - "Repeat" & "TopUp" masih berbagi satu blok gabungan
 // "Repeat + Top Up", dan "SL" sama sekali tidak ada di kedua sheet ini.
 const COST_SOURCE_SEG = { "New":"New", "Repeat":"Repeat+TopUp", "TopUp":"Repeat+TopUp", "LMT":"LMT", "SL": null };
+// Repeat & TopUp are tracked as separate rows in the Lower Funnel log (Created/Paid Out/Paid Out
+// Amount are genuinely different real numbers per segment - summing those over both is correct), but
+// they share ONE combined row in Cost Detail & Upper Funnel (COST_SOURCE_SEG maps both to the same
+// "Repeat+TopUp" source - see comment above). Any total built from a Cost Detail/Upper Funnel-sourced
+// metric (Cost, Budget, CPA, Sent/Delivered/Click/Open) must NOT sum both Repeat and TopUp when they're
+// both selected, or it silently double-counts that one shared number. This collapses a segment list
+// down to one representative per unique cost/engagement source before summing those metrics.
+function dedupeSharedCostSource(segList){
+ const seen = new Set(), out = [];
+ segList.forEach(seg => {
+ const key = COST_SOURCE_SEG[seg] || seg; // segments without a shared source (e.g. SL=null) pass through individually
+ if (seen.has(key)) return;
+ seen.add(key);
+ out.push(seg);
+ });
+ return out;
+}
 // Per-segment analysis focus, as specified by the user: New cares about Created/Eligible/Paid Out
 // Amount; Repeat, TopUp and LMT care about Created/Paid Out/Paid Out Amount. SL has no stated rule -
 // defaulted to the same set as Repeat/TopUp/LMT (the majority pattern) until told otherwise.
@@ -600,13 +618,13 @@ function findLabelRow(rows, label, fromRow0, toRow0){
 // LMT) - not the dashboard's 5 segments - so this maps straight onto COST_SOURCE_SEG's key space.
 // Rows with Segment 2="Lainnya" or Channel 1="Lainnya" are intentionally uncategorized noise (per
 // user confirmation) and are skipped without a warning; anything else unrecognized IS warned about.
-const UPPER_LOG_LABELS = { date:"Sent Date", segment:"Segment 2", channel:"Channel 1", sent:"Sent", delivered:"Delivered", read:"Read", click:"Click" };
+const UPPER_LOG_LABELS = { date:"Sent Date", segment:["Segment 2","Segment 1","Segment"], channel:"Channel 1", sent:"Sent", delivered:"Delivered", read:"Read", click:"Click" };
 const UPPER_SEG_TO_SRC = { "New":"New", "Repeat + Top Up":"Repeat+TopUp", "Repeat":"Repeat+TopUp", "Top Up":"Repeat+TopUp", "Top Up PDF":"Repeat+TopUp", "TopUp":"Repeat+TopUp", "LMT":"LMT" };
 const UPPER_CH_TO_DASH = { "Push Notification":"Push", "Email":"Email", "WhatsApp":"WhatsApp", "Sales AI":"SalesAI" };
 
 // Upper Funnel & Cost Detail: Cost Detail is still the old pivot format with 3 segment blocks -
 // see COST_SOURCE_SEG above for the New / Repeat+TopUp / LMT mapping.
-const COST_SEG_LABEL = { "New": "New", "Repeat+TopUp": "Repeat + Top Up", "LMT": "LMT" };
+const COST_SEG_LABEL = { "New": ["New"], "Repeat+TopUp": ["Repeat + Top Up", "Repeat + Top Up PDF"], "LMT": ["LMT"] };
 
 function buildUpperIndex(rows){
  const { dataStart, col, missing } = resolveColumnsByHeader(rows, UPPER_LOG_LABELS);
@@ -672,10 +690,10 @@ function buildCostIndex(rows){
  if (found >= 0) monthCol[monthNum] = found + 1; else missingMonths.push(label);
  });
  Object.keys(COST_SEG_LABEL).forEach(segKey => {
- const segLabel = COST_SEG_LABEL[segKey];
+ const segLabels = COST_SEG_LABEL[segKey];
  const find = (costLabel) => {
  for (let i = 0; i < rows.length; i++) {
- if (cellText(rows, i, 1) === costLabel && cellText(rows, i, 2) === segLabel) return i;
+ if (cellText(rows, i, 1) === costLabel && segLabels.includes(cellText(rows, i, 2))) return i;
  }
  return -1;
  };
@@ -707,7 +725,7 @@ function costVal(costRows, costIdx, seg, type, month){
 // Date | Segment | Geo | Channel Attribute Logic | Created Apps | After First Filter | Eligible |
 // Accepted Apps | Paid Out | Paid Out Amount | Month. If "Month" itself is missing, it's derived
 // from "Created Date" instead (which is required) - so removing just the Month column is safe.
-const RAW_SEG_TO_DASH_SEG = { "New":"New", "Repeat":"Repeat", "TopUp":"TopUp", "LMT":"LMT", "SL":"SL", "Repeat + Top Up":"Repeat" };
+const RAW_SEG_TO_DASH_SEG = { "New":"New", "Repeat":"Repeat", "TopUp":"TopUp", "Top Up":"TopUp", "Top Up PDF":"TopUp", "LMT":"LMT", "SL":"SL", "Repeat + Top Up":"Repeat", "Repeat + Top Up PDF":"Repeat" };
 const RAW_CH_TO_DASH_CH = { "WhatsApp":"WhatsApp", "Email":"Email", "Push Notification":"Push", "Sales AI":"SalesAI" };
 
 // Finds the header row (anchored on a column literally titled "No") and resolves each requested
@@ -719,21 +737,24 @@ function resolveColumnsByHeader(rows, labelMap){
  const col = {}, missing = [];
  if (headerRow < 0) {
  Object.keys(labelMap).forEach(k => col[k] = null);
- return { headerRow, dataStart, col, missing: Object.values(labelMap) };
+ return { headerRow, dataStart, col, missing: Object.values(labelMap).map(v => Array.isArray(v) ? v[0] : v) };
  }
  const hdrRow = rows[headerRow] || [];
  Object.keys(labelMap).forEach(key => {
- const label = labelMap[key].toLowerCase();
+ // labelMap[key] can be a single header string or an array of accepted aliases (e.g. a column
+ // that got renamed in the sheet - checking multiple names keeps the dashboard working through
+ // that kind of rename instead of silently losing the whole column).
+ const aliases = (Array.isArray(labelMap[key]) ? labelMap[key] : [labelMap[key]]).map(l => l.toLowerCase());
  let idx = -1;
- for (let c = 0; c < hdrRow.length; c++) { if (String(hdrRow[c]||"").trim().toLowerCase() === label) { idx = c; break; } }
- if (idx >= 0) col[key] = idx + 1; else { col[key] = null; missing.push(labelMap[key]); }
+ for (let c = 0; c < hdrRow.length; c++) { if (aliases.includes(String(hdrRow[c]||"").trim().toLowerCase())) { idx = c; break; } }
+ if (idx >= 0) col[key] = idx + 1; else { col[key] = null; missing.push(Array.isArray(labelMap[key]) ? labelMap[key][0] : labelMap[key]); }
  });
  return { headerRow, dataStart, col, missing };
 }
 function cellAtCol(rows, row0, col1){ return col1 == null ? "" : cellText(rows, row0, col1); }
 function valAtCol(rows, row0, col1){ return col1 == null ? null : valAt(rows, row0, col1); }
 
-const LOWER_LOG_LABELS = { date:"Created Date", segment:"Segment", channel:"Channel Attribute Logic", created:"Created Apps", afterFF:"After First Filter", eligible:"Eligible", accepted:"Accepted Apps", paidOut:"Paid Out", paidOutAmount:"Paid Out Amount", month:"Month" };
+const LOWER_LOG_LABELS = { date:"Created Date", segment:["Segment","Segment 2","Segment 1"], channel:"Channel Attribute Logic", created:"Created Apps", afterFF:"After First Filter", eligible:"Eligible", accepted:"Accepted Apps", paidOut:"Paid Out", paidOutAmount:"Paid Out Amount", month:"Month" };
 
 function parseLowerFunnelLog(rows){
  const { dataStart, col, missing } = resolveColumnsByHeader(rows, LOWER_LOG_LABELS);
@@ -1639,6 +1660,12 @@ function updateDropdownLabel(wrapId, panelId, allValues, allLabel){
  else if (checked.length === 1) btn.textContent = `${checked[0]} ▾`;
  else btn.textContent = `${checked.length} dipilih ▾`;
 }
+// Quick-select preset for the Segmen filter - e.g. "Repeat + Top Up PDF" checks exactly those two
+// segment checkboxes (unchecking the rest) so the user doesn't have to click each one manually.
+function selectSegPreset(values){
+ document.querySelectorAll("#segFilterPanel input[type=checkbox]").forEach(el => { el.checked = values.includes(el.value); });
+ onMultiFilterChange();
+}
 function onMultiFilterChange(){
  updateDropdownLabel("segFilterWrap", "segFilterPanel", ALL_SEGMENTS, "Semua Segmen");
  updateDropdownLabel("chFilterWrap", "chFilterPanel", ALL_CHANNELS, "Semua Channel");
@@ -1945,8 +1972,9 @@ function renderKPIs(f){
  return anyData ? total : null;
  }
  function costSum(monthIdx){
- if (allChSelected) return list.reduce((s,seg)=> s + (COST[seg][monthIdx]||0), 0);
- return list.reduce((s,seg)=> {
+ const dedupList = dedupeSharedCostSource(list);
+ if (allChSelected) return dedupList.reduce((s,seg)=> s + (COST[seg][monthIdx]||0), 0);
+ return dedupList.reduce((s,seg)=> {
  let segTotal = 0;
  chSelArr.forEach(ch => { const arr = COST_BY_CHANNEL[seg][ch]; if (arr) segTotal += (arr[monthIdx] || 0); });
  return s + segTotal;
@@ -2393,7 +2421,7 @@ function renderChannelEngageChart(f){
 
  const sum = (metric, monthKey) => {
  let total = 0;
- segList.forEach(seg => chList.forEach(ch => { total += (CHANNEL_ENGAGE[seg][ch][metric + monthKey] || 0); }));
+ dedupeSharedCostSource(segList).forEach(seg => chList.forEach(ch => { total += (CHANNEL_ENGAGE[seg][ch][metric + monthKey] || 0); }));
  return total;
  };
  const sentJun = sum("sent","Jun"), deliveredJun = sum("delivered","Jun"), clickJun = sum("click","Jun"), openJun = sum("open","Jun");
@@ -2401,15 +2429,15 @@ function renderChannelEngageChart(f){
 
  // When the latest month (Jul-suffixed vars = LAST_M, could be a fully in-progress month like
  // "Agustus" in the live data) is still running, forecast its Sent/Delivered/Click/Open to month-end
- // (per dashboard segment -> srcSeg, same double-count convention as sum() above for consistency)
  // BEFORE computing rates and running the significance test - otherwise a partial month's volume and
- // rate mix gets compared straight against a full month, which isn't apples-to-apples.
+ // rate mix gets compared straight against a full month, which isn't apples-to-apples. Deduped the
+ // same way as sum() above (Repeat & TopUp share one Upper Funnel source row, so don't double it).
  let sentJulF = sentJul, deliveredJulF = deliveredJul, clickJulF = clickJul, openJulF = openJul;
  let engageIsForecast = false, engageAsOfDay = null, engageDaysInM = null;
  if (BUDGET_M_IS_CURRENT && FORECAST_SOURCE_UPPER && FORECAST_SOURCE_UPPER.maxDate) {
  const forecastMetric = (metric) => {
  let total = 0, any = false;
- segList.forEach(seg => {
+ dedupeSharedCostSource(segList).forEach(seg => {
  const srcSeg = COST_SOURCE_SEG[seg];
  if (!srcSeg) return;
  const fc = forecastMonthEndFor(FORECAST_SOURCE_UPPER.bySegDate, FORECAST_SOURCE_UPPER.bySegChDate, FORECAST_SOURCE_UPPER.maxDate, [srcSeg], chList, metric);
@@ -2586,7 +2614,7 @@ function renderBudgetChart(f){
  const capEl = document.getElementById("budgetCap");
  const anyPlanned = planned.some(v => v != null);
  if (capEl) {
- const totalPlannedNow = planned.reduce((s,v)=>s+(v||0),0);
+ const totalPlannedNow = dedupeSharedCostSource(list).reduce((s,seg)=>s+((BUDGET_AUG[seg]&&BUDGET_AUG[seg].plannedBudget)||0),0);
  capEl.textContent = (anyPlanned ? `Total budget disetujui ${budgetMonthLabel}: ${rpJt(totalPlannedNow)} (dari sheet Budget Monthly)` : `Belum ada angka budget di sheet Budget Monthly untuk ${budgetMonthLabel} - pakai estimasi CPA di bawah sebagai gantinya.`) + " Angka ini total semua channel - tidak berubah kalau filter Channel diganti, karena Budget Monthly tidak dipecah per channel.";
  }
  if (charts.budget) charts.budget.destroy();
@@ -2610,8 +2638,8 @@ function renderBudgetChart(f){
  }
  });
 
- const totalPlanned = list.reduce((s,seg)=>s+((BUDGET_AUG[seg]&&BUDGET_AUG[seg].plannedBudget)||0),0);
- const totalEstimate = list.reduce((s,seg)=>s+((BUDGET_AUG[seg]&&BUDGET_AUG[seg].estimateDownside)||0),0);
+ const totalPlanned = dedupeSharedCostSource(list).reduce((s,seg)=>s+((BUDGET_AUG[seg]&&BUDGET_AUG[seg].plannedBudget)||0),0);
+ const totalEstimate = dedupeSharedCostSource(list).reduce((s,seg)=>s+((BUDGET_AUG[seg]&&BUDGET_AUG[seg].estimateDownside)||0),0);
  const riskEl = document.getElementById("budgetRisk");
  if (!anyPlanned) {
  riskEl.innerHTML = `<b>Info:</b> sheet Budget Monthly belum punya angka untuk ${budgetMonthLabel} - tidak bisa dibandingkan dulu.`;
@@ -2834,7 +2862,7 @@ function renderChannelDetailTable(f){
  if (el) {
  const chStats = chList.map(ch => {
  let sent=0, click=0;
- list.forEach(seg => { const d = CHANNEL_DETAIL[seg][ch]; if (d && d.sent) { sent += val(d.sent)||0; click += val(d.click)||0; } });
+ dedupeSharedCostSource(list).forEach(seg => { const d = CHANNEL_DETAIL[seg][ch]; if (d && d.sent) { sent += val(d.sent)||0; click += val(d.click)||0; } });
  return { ch, sent, click, rate: sent ? click/sent : null };
  }).filter(x => x.sent > 0);
  if (chStats.length < 2) {
@@ -2918,7 +2946,7 @@ function renderCostByChannelTable(f){
  else {
  const totals = {};
  chList.forEach(ch => { totals[ch] = 0; });
- list.forEach(seg => chList.forEach(ch => { const v = getCur(COST_BY_CHANNEL[seg][ch]); if (v) totals[ch] += v; }));
+ dedupeSharedCostSource(list).forEach(seg => chList.forEach(ch => { const v = getCur(COST_BY_CHANNEL[seg][ch]); if (v) totals[ch] += v; }));
  const grand = Object.values(totals).reduce((a,b)=>a+b,0);
  const sorted = Object.entries(totals).filter(([,v])=>v>0).sort((a,b)=>b[1]-a[1]);
  if (!sorted.length || !grand) { firEl.innerHTML = firHtml("Tidak ada cost tercatat untuk kombinasi ini.","-","-"); }
@@ -3068,11 +3096,19 @@ function renderCostRatioTable(f){
  const firEl = document.getElementById("costRatioFIR");
  if (firEl) {
  let junAmt=0, junCost=0, julAmt=0, julCost=0, anyJul=true;
+ // Paid Out Amount is a genuinely separate real number per segment (Lower Funnel log) - sum normally.
  list.forEach(seg => {
  const d = PO_AMOUNT_COST[seg];
  if (!d) return;
- junAmt += d.junAmt||0; junCost += d.junCost||0;
- if (d.julCost==null || d.julAmt==null) anyJul=false; else { julAmt += d.julAmt; julCost += d.julCost; }
+ junAmt += d.junAmt||0;
+ if (d.julAmt==null) anyJul=false; else julAmt += d.julAmt;
+ });
+ // Cost is shared between Repeat & TopUp (one combined Cost Detail row) - dedupe before summing so it isn't counted twice.
+ dedupeSharedCostSource(list).forEach(seg => {
+ const d = PO_AMOUNT_COST[seg];
+ if (!d) return;
+ junCost += d.junCost||0;
+ if (d.julCost==null) anyJul=false; else julCost += d.julCost;
  });
  if (!junAmt || !anyJul || !julAmt) { firEl.innerHTML = firHtml("Data belum lengkap untuk dianalisis (pooled across segmen terpilih).","-","-"); }
  else {
@@ -3108,8 +3144,9 @@ function renderBudgetAlert(f){
  const list = costSegs(f.seg);
  document.getElementById("budgetAlertCap").textContent = (list.length === ALL_SEGMENTS.filter(s=>COST_SOURCE_SEG[s]).length ? "Semua segmen (SL tidak punya data cost)" : `Segmen: ${list.join(', ') || '(tidak ada yang punya data cost)'}`) + " - angka Budget/Cost selalu total semua channel (Budget Monthly & Cost Detail tidak dipecah per channel), jadi tidak berubah kalau filter Channel di atas diganti.";
 
- const used = list.reduce((s,seg)=> s + (AUG_COST[seg]||0), 0);
- const planned = list.reduce((s,seg)=> s + ((BUDGET_AUG[seg]&&BUDGET_AUG[seg].plannedBudget)||0), 0);
+ const dedupList = dedupeSharedCostSource(list);
+ const used = dedupList.reduce((s,seg)=> s + (AUG_COST[seg]||0), 0);
+ const planned = dedupList.reduce((s,seg)=> s + ((BUDGET_AUG[seg]&&BUDGET_AUG[seg].plannedBudget)||0), 0);
  const pct = planned ? (used/planned*100) : 0;
  const capped = Math.min(pct, 100);
 
